@@ -240,8 +240,11 @@ export interface SenderKeyManagerOptions {
  *   contain the public part.
  */
 export class SenderKeyManager {
-    /** Address of the local device. */
+    /** Address of the local device, in its phone-number form. */
     private localAddress: string
+
+    /** Address of the local device, in its linked-identity form. */
+    private localLidAddress: string
 
     /** The options the manager was created with. */
     private readonly options: SenderKeyManagerOptions
@@ -261,7 +264,7 @@ export class SenderKeyManager {
      * — does not know the current sender key and needs the distribution
      * again.
      */
-    private readonly distributions = new Map<string, number>()
+    private readonly distributions = new Map<string, number>
 
     /**
      * @param options Optional configuration.
@@ -269,6 +272,7 @@ export class SenderKeyManager {
     constructor(options: SenderKeyManagerOptions = {}) {
         this.options = options
         this.localAddress = options.localAddress ?? ''
+        this.localLidAddress = ''
     }
 
     /**
@@ -281,6 +285,31 @@ export class SenderKeyManager {
      */
     setLocalAddress(localAddress: string): void {
         this.localAddress = localAddress
+    }
+
+    /**
+     * Sets both addresses of the local device.
+     *
+     * A group either names its members by phone number or by their linked
+     * identity, and the sender key of a group belongs to the address the
+     * group uses. The manager therefore needs to know both forms.
+     *
+     * @param meJid The phone-number address of the local device.
+     * @param meLid The linked-identity address of the local device.
+     */
+    setLocalAddresses(meJid: string, meLid?: string): void {
+        this.localAddress = meJid
+        this.localLidAddress = meLid ?? ''
+    }
+
+    /**
+     * Returns the address the local device uses in a group.
+     *
+     * @param addressingMode The addressing mode of the group.
+     */
+    resolveSenderAddress(addressingMode: 'lid' | 'pn'): string {
+        if (addressingMode === 'lid' && this.localLidAddress) return this.localLidAddress
+        return this.localAddress
     }
 
     /**
@@ -298,15 +327,28 @@ export class SenderKeyManager {
      *
      * A fresh sender key gets a random id, a random chain key and a fresh
      * signing key pair.
+     *
+     * @param groupId The group id.
+     * @param sender The address that owns the key. A group that names its
+     *   members by linked identity owns the key under that address, so the
+     *   owner follows the addressing mode of the group.
      */
-    ensureSenderKey(groupId: string): SenderKeyRecord {
+    ensureSenderKey(groupId: string, sender?: string): SenderKeyRecord {
         const existing = this.ownKeys.get(groupId)
-        if (existing) return existing
+        if (existing) {
+            if (sender && existing.sender !== sender) {
+                // The addressing mode of the group changed: the key material
+                // stays, only the name of its owner follows the mode.
+                existing.sender = sender
+                this.notifyChanged()
+            }
+            return existing
+        }
 
         const signingKeyPair = generateSerializedKeyPair()
         const record: SenderKeyRecord = {
             groupId,
-            sender: this.localAddress,
+            sender: sender ?? this.localAddress,
             keyId: 1 + randomInt31(),
             iteration: 0,
             chainKey: randomBytesOf(32),
@@ -339,7 +381,7 @@ export class SenderKeyManager {
         const signingKeyPair = generateSerializedKeyPair()
         const record: SenderKeyRecord = {
             groupId,
-            sender: this.localAddress,
+            sender: existing?.sender ?? this.localAddress,
             keyId: 1 + randomInt31(),
             iteration: 0,
             chainKey: randomBytesOf(32),
@@ -449,9 +491,14 @@ export class SenderKeyManager {
      *
      * @param groupId The group id.
      * @param plaintext The message body.
+     * @param sender The address that owns the sender key.
      */
-    prepareGroupEncryption(groupId: string, plaintext: Uint8Array): GroupEncryptionResult {
-        const record = this.ensureSenderKey(groupId)
+    prepareGroupEncryption(
+        groupId: string,
+        plaintext: Uint8Array,
+        sender?: string,
+    ): GroupEncryptionResult {
+        const record = this.ensureSenderKey(groupId, sender)
         const signingPrivateKey = record.signingPrivateKey
         if (!signingPrivateKey) {
             throw new Error('sender key signing private key is missing')

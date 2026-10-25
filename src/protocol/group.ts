@@ -26,6 +26,16 @@ import { WA_NODE_TAGS } from './constants.js'
 /** The role of a group member. */
 export type GroupParticipantRole = 'admin' | 'superadmin' | 'regular'
 
+/**
+ * The way a group addresses its members.
+ *
+ * A group either names its members by phone number or by their linked
+ * identity (LID). The mode decides which address the sender has to use for
+ * itself, which address the members are reached with, and it travels in the
+ * `addressing_mode` attribute of every group stanza.
+ */
+export type GroupAddressingMode = 'lid' | 'pn'
+
 /** A member of a group. */
 export interface GroupParticipant {
     /** The address the group addresses the member with. */
@@ -109,6 +119,30 @@ export function parseGroupParticipants(node: BinaryNode): GroupParticipant[] {
         out.push(entry)
     }
     return out
+}
+
+/**
+ * Resolves the addressing mode of a group from its member list.
+ *
+ * A group that names at least one of its members by linked identity is a
+ * *LID* group: every stanza it carries names its sender and its members by
+ * that identity. A group that names all of its members by phone number is a
+ * *PN* group.
+ *
+ * The mode is not cosmetic. The sender key of a group belongs to the address
+ * the group uses, and the `addressing_mode` attribute tells the server how
+ * the addresses in the stanza have to be read, so a group message that uses
+ * the wrong mode is not delivered to the members.
+ *
+ * @param participants The members of the group.
+ */
+export function resolveGroupAddressingMode(
+    participants: readonly { jid: string }[],
+): GroupAddressingMode {
+    for (const participant of participants) {
+        if (participant.jid.endsWith('@lid')) return 'lid'
+    }
+    return 'pn'
 }
 
 /**

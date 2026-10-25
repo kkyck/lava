@@ -17,7 +17,7 @@
  */
 
 import { WA_IQ_TYPES, WA_NODE_TAGS, WA_XMLNS } from '../protocol/constants.js'
-import { HOST_DOMAIN } from '../protocol/jid.js'
+import { HOST_DOMAIN, parseSignalAddressFromJid } from '../protocol/jid.js'
 import type { BinaryNode } from '../transport/binary/types.js'
 import {
     decodeNodeContentBytes,
@@ -474,6 +474,57 @@ function parseUserDevices(node: BinaryNode, userJid: string): PreKeyDeviceResult
         })
     }
     return out
+}
+
+/**
+ * Picks the bundle of one device out of a pre-key answer.
+ *
+ * The server does not answer a pre-key request with the device that was
+ * asked for: it answers with **every** device of the user, and the order of
+ * the answer is neither the order of the request nor the device order. A
+ * caller that wants one specific device therefore has to select it
+ * explicitly — taking the first entry hands the identity key of a *different*
+ * device to the session, and every later message of that device fails to
+ * decrypt.
+ *
+ * The devices are matched by user and device id, so a bundle is also found
+ * when the answer names the device with a different server (a phone-number
+ * address instead of a linked-identity one, for example).
+ *
+ * @param devices The devices of the answer.
+ * @param deviceJid The device whose bundle is wanted.
+ * @returns The bundle of that device, or `undefined` when it is not in the
+ * answer.
+ */
+export function selectPreKeyBundle(
+    devices: readonly PreKeyDeviceResult[],
+    deviceJid: string,
+): PreKeyDeviceResult['bundle'] | undefined {
+    let targetUser: string | null = null
+    let targetDevice = 0
+    try {
+        const address = parseSignalAddressFromJid(deviceJid)
+        targetUser = address.user
+        targetDevice = address.device
+    } catch {
+        targetUser = null
+    }
+
+    for (const entry of devices) {
+        if (targetUser === null) {
+            if (entry.deviceJid === deviceJid) return entry.bundle
+            continue
+        }
+        try {
+            const address = parseSignalAddressFromJid(entry.deviceJid)
+            if (address.user === targetUser && address.device === targetDevice) {
+                return entry.bundle
+            }
+        } catch {
+            // A device JID that cannot be parsed belongs to no device.
+        }
+    }
+    return undefined
 }
 
 /**

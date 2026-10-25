@@ -169,6 +169,8 @@ export {
     GROUP_METADATA_CACHE_TTL_MS,
     parseGroupMetadata,
     parseGroupParticipants,
+    resolveGroupAddressingMode,
+    type GroupAddressingMode,
     type GroupMetadata,
     type GroupParticipant,
     type GroupParticipantRole,
@@ -322,6 +324,7 @@ export {
     buildPreKeyUploadIq,
     buildSignedPreKeyRotateIq,
     parseMissingPreKeysResponse,
+    selectPreKeyBundle,
 } from './signal/api.js'
 
 export {

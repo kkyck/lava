@@ -29,7 +29,7 @@ import {
     buildGroupSenderKeyMessageNode,
 } from '../src/transport/node/builders/message.js'
 import { findNodeChild, getNodeChildrenByTag } from '../src/transport/node/helpers.js'
-import { buildMissingPreKeysFetchIq } from '../src/signal/api.js'
+import { buildMissingPreKeysFetchIq, selectPreKeyBundle } from '../src/signal/api.js'
 import type { BinaryNode } from '../src/transport/binary/types.js'
 
 describe('global node builders', () => {
@@ -208,6 +208,53 @@ describe('signal node builders', () => {
         assert.ok(registration)
         assert.deepEqual(Array.from(registration.content as Uint8Array), [0, 0, 6, 85])
     })
+
+    it('picks the bundle of the requested device, not the first one', () => {
+        // The server answers a pre-key request with *every* device of the
+        // user, and the answer is not ordered by device id. Taking the first
+        // entry would hand the identity key of another device to the session.
+        const devices = [
+            {
+                deviceJid: '123:2@lid',
+                bundle: {
+                    regId: 8643,
+                    identity: new Uint8Array([2]),
+                    signedKey: { id: 2, publicKey: new Uint8Array([2]) },
+                    oneTimeKey: null,
+                },
+            },
+            {
+                deviceJid: '123@lid',
+                bundle: {
+                    regId: 1918859632,
+                    identity: new Uint8Array([0]),
+                    signedKey: { id: 1, publicKey: new Uint8Array([1]) },
+                    oneTimeKey: null,
+                },
+            },
+        ]
+        const zero = selectPreKeyBundle(devices, '123@lid')
+        assert.equal(zero?.regId, 1918859632)
+        const two = selectPreKeyBundle(devices, '123:2@lid')
+        assert.equal(two?.regId, 8643)
+        assert.equal(selectPreKeyBundle(devices, '456@lid'), undefined)
+    })
+
+    it('matches a device across servers', () => {
+        const devices = [
+            {
+                deviceJid: '123@lid',
+                bundle: {
+                    regId: 7,
+                    identity: new Uint8Array([0]),
+                    signedKey: { id: 1, publicKey: new Uint8Array([1]) },
+                    oneTimeKey: null,
+                },
+            },
+        ]
+        const bundle = selectPreKeyBundle(devices, '123@s.whatsapp.net')
+        assert.equal(bundle?.regId, 7)
+    })
 })
 
 describe('message node builders', () => {
@@ -249,5 +296,23 @@ describe('message node builders', () => {
         assert.equal(enc.attrs.type, 'skmsg')
         assert.ok(enc.content instanceof Uint8Array)
         assert.deepEqual(enc.content, new Uint8Array([4, 5, 6]))
+    })
+
+    it('names the addressing mode of the group', () => {
+        const node = buildGroupSenderKeyMessageNode(
+            { to: 'group@g.us', type: 'text', id: 'MSG3', addressingMode: 'lid' },
+            [],
+            new Uint8Array([4]),
+        )
+        assert.equal(node.attrs.addressing_mode, 'lid')
+    })
+
+    it('leaves the addressing mode out when it is unknown', () => {
+        const node = buildGroupSenderKeyMessageNode(
+            { to: 'group@g.us', type: 'text', id: 'MSG4' },
+            [],
+            new Uint8Array([4]),
+        )
+        assert.equal(node.attrs.addressing_mode, undefined)
     })
 })

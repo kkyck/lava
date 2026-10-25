@@ -178,6 +178,28 @@ export class SignalSessionManager {
     }
 
     /**
+     * Returns the device addresses of every tracked session of a user.
+     *
+     * A stanza names the sender by its user address, not by the device that
+     * produced it, so a payload may have been encrypted for any of the
+     * devices the peer runs. Every device this device has a session with is
+     * therefore a candidate.
+     *
+     * @param user The user, without the server part.
+     */
+    sessionAddresses(user: string): string[] {
+        const out: string[] = []
+        for (const key of this.sessions.keys()) {
+            const parts = key.split('|')
+            if (parts.length !== 3) continue
+            const [keyUser, server, device] = parts
+            if (keyUser !== user) continue
+            out.push(device === '0' ? `${user}@${server}` : `${user}:${device}@${server}`)
+        }
+        return out
+    }
+
+    /**
      * Exports every tracked session.
      *
      * The double ratchet state cannot be recreated from the key material, so
@@ -272,9 +294,14 @@ export class SignalSessionManager {
      *
      * @param groupId The group's JID.
      * @param plaintext The payload.
+     * @param sender The address that owns the sender key of the group.
      */
-    encryptForGroup(groupId: string, plaintext: Uint8Array): EncryptedForPeer {
-        const result = this.senderKeyManager.prepareGroupEncryption(groupId, plaintext)
+    encryptForGroup(
+        groupId: string,
+        plaintext: Uint8Array,
+        sender?: string,
+    ): EncryptedForPeer {
+        const result = this.senderKeyManager.prepareGroupEncryption(groupId, plaintext, sender)
         return {
             ciphertext: result.ciphertext,
             encType: 'skmsg',

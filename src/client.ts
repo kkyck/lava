@@ -100,6 +100,7 @@ import {
     buildPreKeyUploadIq,
     buildSignedPreKeyRotateIq,
     parseMissingPreKeysResponse,
+    selectPreKeyBundle,
     SIGNAL_UPLOAD_PREKEYS_COUNT,
 } from './signal/api.js'
 import {
@@ -200,6 +201,7 @@ import {
     GroupMetadataCache,
     parseGroupMetadata,
     parseGroupParticipants,
+    resolveGroupAddressingMode,
 } from './protocol/group.js'
 import type { GroupMetadata, GroupParticipant } from './protocol/group.js'
 import { parseRetryReceipt } from './protocol/retry.js'
@@ -976,7 +978,10 @@ export class LavaClient extends EventEmitter {
         // The sender keys name their owner, so the address of the local
         // device has to be known before the first group message.
         if (snapshot.meJid) {
-            this.signal.senderKeyManager.setLocalAddress(snapshot.meJid)
+            this.signal.senderKeyManager.setLocalAddresses(
+                snapshot.meJid,
+                snapshot.meLid,
+            )
         }
         if (!this.keyStore.getRegistrationInfo()) {
             this.keyStore.setRegistrationInfo({
@@ -1481,7 +1486,7 @@ export class LavaClient extends EventEmitter {
         const meLid = deviceNode.attrs.lid
         if (meJid) {
             // The sender keys name their owner.
-            this.signal.senderKeyManager.setLocalAddress(meJid)
+            this.signal.senderKeyManager.setLocalAddresses(meJid, meLid)
         }
         await this.updateCredentials({
             ...(meJid ? { meJid } : {}),
@@ -1682,6 +1687,17 @@ export class LavaClient extends EventEmitter {
             for (const device of known) {
                 if (!addresses.includes(device.jid)) addresses.push(device.jid)
             }
+        }
+
+        /**
+         * A stanza names the sender by its user address, so the payload may
+         * have been encrypted for any of the devices the peer runs. Every
+         * device this device has a session with is therefore a candidate —
+         * and the only ones that can work, because a session is needed to
+         * decrypt a payload at all.
+         */
+        for (const address of this.signal.sessionAddresses(parseSignalAddressFromJid(sender).user)) {
+            if (!addresses.includes(address)) addresses.push(address)
         }
         return addresses
     }
@@ -2969,6 +2985,36 @@ export class LavaClient extends EventEmitter {
         refresh: (groupJid: string): void => {
             this.groupParticipants.invalidate(groupJid)
         },
+
+        /**
+         * Starts a new generation of the sender key of a group.
+         *
+         * The group is re-keyed: a fresh key id, a fresh chain key and a
+         * fresh signing key pair. The generation it replaces is kept, so a
+         * message that was encrypted with it can still be read. The new
+         * generation is announced to the members with the next message.
+         *
+         * @param groupJid The group.
+         * @returns The id of the new sender key.
+         */
+        rotateSenderKey: (groupJid: string): number => {
+            const record = this.signal.senderKeyManager.rotateSenderKey(groupJid)
+            return record.keyId
+        },
+
+        /**
+         * Announces the sender key of a group to its members again.
+         *
+         * The devices that already know the sender key are not told about it
+         * a second time, which keeps the stanza small. After this call every
+         * device of the group receives the distribution with the next
+         * message — the way to repair a member that never got the sender key.
+         *
+         * @param groupJid The group.
+         */
+        redistributeSenderKey: (groupJid: string): void => {
+            this.signal.senderKeyManager.forgetDistributions(groupJid)
+        },
     }
 
     /** The profile API. */
@@ -3275,12 +3321,26 @@ export class LavaClient extends EventEmitter {
         plaintext: Uint8Array,
         attrs: ReturnType<typeof resolveOutboundMessageAttrs>,
     ): Promise<void> {
+        /**
+         * A group either names its members by phone number or by their
+         * linked identity. The mode decides which address the sender uses
+         * for itself, which address the members are reached with, and it
+         * travels in the `addressing_mode` attribute of the stanza: a group
+         * message that leaves it out is not delivered.
+         */
+        const members = await this.queryGroupParticipants(groupJid)
+        if (members.length === 0) {
+            throw new Error(`client: no members known for ${groupJid}`)
+        }
+        const addressingMode = resolveGroupAddressingMode(members)
+        const senderJid = this.signal.senderKeyManager.resolveSenderAddress(addressingMode)
+
         const devices = await this.resolveGroupDevices(groupJid)
         if (devices.length === 0) {
             throw new Error(`client: no devices known for ${groupJid}`)
         }
 
-        const group = this.signal.encryptForGroup(groupJid, plaintext)
+        const group = this.signal.encryptForGroup(groupJid, plaintext, senderJid)
         const distribution = group.distributionMessage
         if (!distribution) throw new Error('client: no sender key distribution was produced')
 
@@ -3331,9 +3391,13 @@ export class LavaClient extends EventEmitter {
             distributed,
         )
 
-        const phashTargets: string[] = devices.map((device) => device.jid)
-        const meJid = this.credentials?.meJid
-        if (meJid) phashTargets.push(meJid)
+        /**
+         * The participant hash covers the devices the message is fanned out
+         * to, plus the sender itself. The local device is not part of the
+         * fanout: it reads its own copy out of the sender key it holds.
+         */
+        const phashTargets: string[] = this.groupFanoutDevices(groupJid, devices)
+        if (senderJid) phashTargets.push(senderJid)
 
         this.send(
             buildGroupSenderKeyMessageNode(
@@ -3342,6 +3406,7 @@ export class LavaClient extends EventEmitter {
                     type: attrs.typeAttr,
                     id,
                     phash: computePhashV2(phashTargets),
+                    addressingMode,
                     ...(attrs.mediatype ? { mediatype: attrs.mediatype } : {}),
                     ...(attrs.edit ? { edit: attrs.edit } : {}),
                     ...(attrs.decryptFail ? { decryptFail: attrs.decryptFail } : {}),
@@ -3378,6 +3443,43 @@ export class LavaClient extends EventEmitter {
         const out: DeviceEntry[] = []
         for (const entry of entries) out.push(...entry.devices)
         return out
+    }
+
+    /**
+     * Returns the devices a group message is fanned out to.
+     *
+     * The local device is left out: it reads its own copy of the message out
+     * of the sender key it holds, so a copy for itself would be a waste.
+     *
+     * @param groupJid The group.
+     * @param devices The devices of every member.
+     */
+    private groupFanoutDevices(groupJid: string, devices: readonly DeviceEntry[]): string[] {
+        const local = new Set<string>()
+        const meJid = this.credentials?.meJid
+        const meLid = this.credentials?.meLid
+        if (meJid) local.add(this.normalizeDeviceJid(meJid))
+        if (meLid) local.add(this.normalizeDeviceJid(meLid))
+
+        const out: string[] = []
+        for (const device of devices) {
+            if (local.has(this.normalizeDeviceJid(device.jid))) continue
+            out.push(device.jid)
+        }
+        return out
+    }
+
+    /**
+     * Normalizes a device address to the `user:device@server` form.
+     *
+     * @param jid The address.
+     */
+    private normalizeDeviceJid(jid: string): string {
+        const address = parseSignalAddressFromJid(jid)
+        const server = address.server ?? HOST_DOMAIN
+        return address.device === 0
+            ? `${address.user}@${server}`
+            : `${address.user}:${address.device}@${server}`
     }
 
     /**
@@ -3461,7 +3563,15 @@ export class LavaClient extends EventEmitter {
         )
         assertIqResult(response, 'prekey fetch')
         const results = parseMissingPreKeysResponse(response, [{ userJid, devices: [] }])
-        const bundle = results[0]?.devices?.[0]?.bundle
+        /**
+         * The server answers with *every* device of the user, not only the one
+         * that was asked for, and the answer is not ordered by device id. The
+         * bundle of the requested device therefore has to be picked
+         * explicitly: taking the first entry hands the identity key of a
+         * different device to the session, and every later message of that
+         * device fails to decrypt.
+         */
+        const bundle = selectPreKeyBundle(results[0]?.devices ?? [], deviceJid)
         if (!bundle) throw new Error(`client: no pre-key bundle for ${deviceJid}`)
         this.signal.ensureSession(deviceJid, {
             regId: bundle.regId,

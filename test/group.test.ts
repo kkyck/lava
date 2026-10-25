@@ -15,6 +15,7 @@ import {
     GroupMetadataCache,
     parseGroupMetadata,
     parseGroupParticipants,
+    resolveGroupAddressingMode,
 } from '../src/protocol/group.js'
 import type { BinaryNode } from '../src/transport/binary/types.js'
 
@@ -116,6 +117,28 @@ describe('group metadata', () => {
             () => parseGroupMetadata({ tag: 'iq', attrs: {}, content: null }),
             /expected a <group> node/,
         )
+    })
+})
+
+describe('group addressing mode', () => {
+    it('uses the linked identity when a member is addressed by it', () => {
+        const mode = resolveGroupAddressingMode([
+            { jid: '11111111111@s.whatsapp.net' },
+            { jid: '22222222222@lid' },
+        ])
+        assert.equal(mode, 'lid')
+    })
+
+    it('uses the phone number when every member is addressed by it', () => {
+        const mode = resolveGroupAddressingMode([
+            { jid: '11111111111@s.whatsapp.net' },
+            { jid: '22222222222@s.whatsapp.net' },
+        ])
+        assert.equal(mode, 'pn')
+    })
+
+    it('uses the phone number when the group has no member', () => {
+        assert.equal(resolveGroupAddressingMode([]), 'pn')
     })
 })
 

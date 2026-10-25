@@ -49,6 +49,15 @@ export interface MessageNodeOptions {
     id?: string
     /** The participant hash for group and broadcast fanouts. */
     phash?: string
+    /**
+     * The addressing mode of the group.
+     *
+     * A group either names its members by phone number or by their linked
+     * identity. The attribute tells the server how the addresses of the
+     * stanza have to be read, so a group message that leaves it out is not
+     * delivered to the members.
+     */
+    addressingMode?: 'lid' | 'pn'
     /** The `edit` attribute. */
     edit?: string
     /** The `mediatype` attribute. */
@@ -104,6 +113,7 @@ function buildMessageAttrs(options: MessageNodeOptions): Record<string, string> 
     if (options.id) attrs.id = options.id
     if (options.edit) attrs.edit = options.edit
     if (options.phash) attrs.phash = options.phash
+    if (options.addressingMode) attrs.addressing_mode = options.addressingMode
     if (options.participant) attrs.participant = options.participant
     if (options.additionalAttributes) Object.assign(attrs, options.additionalAttributes)
     return attrs

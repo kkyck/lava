@@ -546,6 +546,80 @@ describe('sender key distribution bookkeeping', () => {
     })
 })
 
+describe('sender key ownership', () => {
+    it('names the owner of the key after the addressing mode of the group', () => {
+        const manager = new SenderKeyManager({
+            localAddress: '11111111111:2@s.whatsapp.net',
+        })
+        manager.setLocalAddresses('11111111111:2@s.whatsapp.net', '99999999999:2@lid')
+
+        assert.equal(manager.resolveSenderAddress('lid'), '99999999999:2@lid')
+        assert.equal(manager.resolveSenderAddress('pn'), '11111111111:2@s.whatsapp.net')
+    })
+
+    it('falls back to the phone number when the account has no linked identity', () => {
+        const manager = new SenderKeyManager({
+            localAddress: '11111111111:2@s.whatsapp.net',
+        })
+        manager.setLocalAddresses('11111111111:2@s.whatsapp.net')
+
+        assert.equal(manager.resolveSenderAddress('lid'), '11111111111:2@s.whatsapp.net')
+    })
+
+    it('keeps the key material when the owner changes', () => {
+        const manager = new SenderKeyManager({
+            localAddress: '11111111111:2@s.whatsapp.net',
+        })
+        manager.setLocalAddresses('11111111111:2@s.whatsapp.net', '99999999999:2@lid')
+
+        const first = manager.ensureSenderKey(GROUP, '11111111111:2@s.whatsapp.net')
+        const second = manager.ensureSenderKey(GROUP, '99999999999:2@lid')
+
+        assert.equal(second.keyId, first.keyId)
+        assert.equal(second.chainKey.length, first.chainKey.length)
+        assert.equal(second.sender, '99999999999:2@lid')
+    })
+
+    it('encrypts a group message for the owner of the addressing mode', () => {
+        const store = makeKeyStore()
+        const manager = new SignalSessionManager({
+            keyStore: store,
+            senderKeyManager: new SenderKeyManager({
+                localAddress: '11111111111:2@s.whatsapp.net',
+            }),
+        })
+        manager.senderKeyManager.setLocalAddresses(
+            '11111111111:2@s.whatsapp.net',
+            '99999999999:2@lid',
+        )
+
+        const group = manager.encryptForGroup(GROUP, utf8('hello'), '99999999999:2@lid')
+        assert.equal(
+            manager.senderKeyManager.getSenderKey(GROUP)!.sender,
+            '99999999999:2@lid',
+        )
+        assert.ok(group.distributionMessage)
+    })
+})
+
+describe('session lookup by user', () => {
+    it('lists every device of a user a session exists for', () => {
+        const alice = makePeer(ALICE)
+        const bob = makePeer(BOB)
+
+        startSession(alice, bob, BOB, ALICE)
+        startSession(bob, alice, ALICE, BOB)
+
+        const addresses = alice.manager.sessionAddresses('22222222222')
+        assert.deepEqual(addresses, ['22222222222@s.whatsapp.net'])
+    })
+
+    it('ignores the sessions of another user', () => {
+        const alice = makePeer(ALICE)
+        assert.deepEqual(alice.manager.sessionAddresses('33333333333'), [])
+    })
+})
+
 // Small helpers so the test does not depend on the crypto module layout.
 function utf8(value: string): Uint8Array {
     return new TextEncoder().encode(value)
