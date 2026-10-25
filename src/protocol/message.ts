@@ -216,6 +216,32 @@ export function buildRevokeContent(target: MessageKey): MessageContent {
 }
 
 /**
+ * Builds an edit message.
+ *
+ * The new text travels inside a `protocolMessage` of the type
+ * `MESSAGE_EDIT`; the key names the message that is edited, so the
+ * recipient replaces it instead of showing a second message.
+ *
+ * @param target The edited message.
+ * @param body The new content of the message.
+ * @param timestampMs When the edit happened.
+ */
+export function buildEditContent(
+    target: MessageKey,
+    body: MessageContent,
+    timestampMs = Date.now(),
+): MessageContent {
+    return {
+        protocolMessage: {
+            key: target,
+            type: PROTOCOL_MESSAGE_TYPE.MESSAGE_EDIT,
+            editedMessage: body,
+            timestampMs,
+        },
+    }
+}
+
+/**
  * Builds a location message.
  *
  * @param location The location payload.

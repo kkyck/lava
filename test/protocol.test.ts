@@ -19,6 +19,7 @@ import {
 } from '../src/protocol/jid.js'
 import {
     buildContactContent,
+    buildEditContent,
     buildLocationContent,
     buildPollContent,
     buildReactionContent,
@@ -125,8 +126,29 @@ describe('message content', () => {
         assert.equal(protocol.type, 0)
     })
 
-    it('builds a location', () => {
-        const body = buildLocationContent({ latitude: 1.5, longitude: 2.5, name: 'Office' })
+    it('builds an edit', () => {
+        const body = buildEditContent(
+            { remoteJid: '123@s.whatsapp.net', fromMe: true, id: 'MSG1' },
+            buildTextContent('fixed'),
+        )
+        const protocol = body.protocolMessage as Record<string, unknown>
+        assert.equal(protocol.type, 14)
+        const key = protocol.key as Record<string, unknown>
+        assert.equal(key.id, 'MSG1')
+        const edited = protocol.editedMessage as Record<string, unknown>
+        assert.equal(edited.conversation, 'fixed')
+    })
+
+    it('marks an edit with the edit attribute', () => {
+        const body = buildEditContent(
+            { remoteJid: '123@s.whatsapp.net', fromMe: true, id: 'MSG1' },
+            buildTextContent('fixed'),
+        )
+        const attrs = resolveOutboundMessageAttrs(body)
+        assert.equal(attrs.edit, '1')
+    })
+
+    it('builds a location', () => {        const body = buildLocationContent({ latitude: 1.5, longitude: 2.5, name: 'Office' })
         const location = body.locationMessage as Record<string, unknown>
         assert.equal(location.degreesLatitude, 1.5)
         assert.equal(location.name, 'Office')

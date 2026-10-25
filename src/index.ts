@@ -150,6 +150,7 @@ export {
     EDIT_ATTRS,
     PROTOCOL_MESSAGE_TYPE,
     buildContactContent,
+    buildEditContent,
     buildLocationContent,
     buildPollContent,
     buildReactionContent,

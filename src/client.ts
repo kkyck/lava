@@ -84,6 +84,7 @@ import {
     buildTextContent,
     buildReactionContent,
     buildRevokeContent,
+    buildEditContent,
     buildLocationContent,
     buildContactContent,
     buildPollContent,
@@ -3347,6 +3348,35 @@ export class LavaClient extends EventEmitter {
          */
         revoke: async (to: string, target: MessageKey): Promise<string> => {
             return this.sendBody(to, buildRevokeContent(target))
+        },
+
+        /**
+         * Edits a message that was sent earlier.
+         *
+         * The edit replaces the message in the chat of the recipient — it
+         * does not show up as a new message.
+         *
+         * @param to The chat the message is in.
+         * @param target The edited message.
+         * @param text The new text.
+         */
+        edit: async (to: string, target: MessageKey, text: string): Promise<string> => {
+            return this.sendBody(to, buildEditContent(target, buildTextContent(text)))
+        },
+
+        /**
+         * Edits a message with a pre-built body.
+         *
+         * @param to The chat the message is in.
+         * @param target The edited message.
+         * @param body The new content of the message.
+         */
+        editBody: async (
+            to: string,
+            target: MessageKey,
+            body: MessageContent,
+        ): Promise<string> => {
+            return this.sendBody(to, buildEditContent(target, body))
         },
 
         /**

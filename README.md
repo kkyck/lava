@@ -371,6 +371,10 @@ await client.message.sendLocation(to, { latitude: 1.5, longitude: 2.5 })
 await client.message.sendContact(to, { displayName: 'Alice', vcard: '…' })
 await client.message.createPoll(to, { name: 'Lunch?', options: [{ name: 'Pizza' }] })
 
+// Edit a message that was sent earlier — the recipient sees the new text
+// in place of the old one.
+await client.message.edit(to, target, 'fixed typo')
+
 // Mark a chat as read.
 await client.message.read(to, { id: 'LAST_MESSAGE_ID' })
 ```
