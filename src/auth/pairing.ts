@@ -29,6 +29,7 @@ import {
     hkdf,
     pbkdf2Sha256,
     randomBytesOf,
+    toRawPublicKey,
     utf8,
     x25519,
     x25519PublicFromPrivate,
@@ -207,6 +208,12 @@ export async function completeCompanionFinish(
 
     const sharedEphemeral = x25519(input.companionEphemeralPrivateKey, primaryEphemeralPub)
     const sharedIdentity = x25519(input.identityKeyPair.privKey, input.primaryIdentityPub)
+    /**
+     * The key bundle carries the *raw* form of the identity keys: the
+     * phone checks the bundle against the raw key it owns, so a serialized
+     * key would make it reject the pairing.
+     */
+    const companionIdentityPublic = toRawPublicKey(input.identityKeyPair.pubKey)
     const bundleSalt = randomBytesOf(32)
     const bundleSecret = randomBytesOf(32)
     const bundleIv = randomBytesOf(12)
@@ -218,7 +225,7 @@ export async function completeCompanionFinish(
         32,
     )
     const plaintextBundle = concat(
-        input.identityKeyPair.pubKey,
+        companionIdentityPublic,
         input.primaryIdentityPub,
         bundleSecret,
     )
@@ -229,7 +236,7 @@ export async function completeCompanionFinish(
 
     return {
         wrappedKeyBundle: concat(bundleSalt, bundleIv, encryptedBundle),
-        companionIdentityPublic: input.identityKeyPair.pubKey,
+        companionIdentityPublic,
         advSecret,
     }
 }

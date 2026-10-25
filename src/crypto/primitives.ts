@@ -430,6 +430,23 @@ export function toSerializedPublicKey(value: Uint8Array): Uint8Array {
 }
 
 /**
+ * Strips the `0x05` prefix from a serialized Signal public key.
+ *
+ * A Signal key pair is kept in its serialized form — 33 bytes with the
+ * version byte — but the protocol carries identity keys in their raw form
+ * on the wire, and the pairing key bundle is built from the raw form as
+ * well.
+ *
+ * @param value The key, serialized or raw.
+ * @returns The raw 32 byte key.
+ */
+export function toRawPublicKey(value: Uint8Array): Uint8Array {
+    if (value.length === 32) return value
+    if (value.length === 33 && value[0] === 5) return value.subarray(1)
+    throw new Error(`invalid signal public key length ${value.length}`)
+}
+
+/**
  * Prefixes content with a Signal version byte: `(v << 4) | v`.
  */
 export function prependVersion(content: Uint8Array, version: number): Uint8Array {

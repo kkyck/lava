@@ -22,6 +22,7 @@
 
 import { createHash } from 'node:crypto'
 
+import { toRawPublicKey } from '../crypto/primitives.js'
 import { WA_IQ_TYPES, WA_NODE_TAGS, WA_XMLNS } from '../protocol/constants.js'
 import { HOST_DOMAIN } from '../protocol/jid.js'
 import type { BinaryNode } from '../transport/binary/types.js'
@@ -67,11 +68,6 @@ export interface SignalDigest {
     preKeyIds: number[]
     /** The SHA-1 hash over the bundle. */
     hash: Uint8Array
-}
-
-/** Strips the `0x05` prefix from a serialized public key. */
-function toRawPubKey(key: Uint8Array): Uint8Array {
-    return key.length === 33 ? key.subarray(1) : key
 }
 
 /**
@@ -219,11 +215,11 @@ export function computeKeyBundleHash(
     preKeys: PreKeyRecord[],
 ): Uint8Array {
     const hash = createHash('sha1')
-    hash.update(toRawPubKey(registration.identityKeyPair.pubKey))
-    hash.update(toRawPubKey(signedPreKey.keyPair.pubKey))
+    hash.update(toRawPublicKey(registration.identityKeyPair.pubKey))
+    hash.update(toRawPublicKey(signedPreKey.keyPair.pubKey))
     hash.update(signedPreKey.signature)
     for (const record of preKeys) {
-        hash.update(toRawPubKey(record.keyPair.pubKey))
+        hash.update(toRawPublicKey(record.keyPair.pubKey))
     }
     return new Uint8Array(hash.digest())
 }
@@ -289,12 +285,12 @@ export function validateKeyBundleDigest(
     if (digest.registrationId !== registration.registrationId) {
         return fail('registration_mismatch')
     }
-    if (!bytesEqual(toRawPubKey(registration.identityKeyPair.pubKey), digest.identity)) {
+    if (!bytesEqual(toRawPublicKey(registration.identityKeyPair.pubKey), digest.identity)) {
         return fail('identity_mismatch')
     }
     if (
         digest.signedKey.id !== signedPreKey.keyId ||
-        !bytesEqual(toRawPubKey(signedPreKey.keyPair.pubKey), digest.signedKey.publicKey) ||
+        !bytesEqual(toRawPublicKey(signedPreKey.keyPair.pubKey), digest.signedKey.publicKey) ||
         !bytesEqual(signedPreKey.signature, digest.signedKey.signature)
     ) {
         return fail('signed_prekey_mismatch')

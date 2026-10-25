@@ -122,7 +122,18 @@ export class Connection {
         const id = this.iq.nextId()
         const tagged: BinaryNode = { ...node, attrs: { ...node.attrs, id } }
         const response = this.iq.expect(id, timeoutMs)
-        this.send(tagged)
+        /**
+         * A stanza that cannot go out has to leave the request behind: the
+         * pending promise would reject on its own timeout, with nobody
+         * listening to it, and an unhandled rejection takes the host process
+         * down.
+         */
+        try {
+            this.send(tagged)
+        } catch (error) {
+            this.iq.discard(id)
+            throw error
+        }
         return response
     }
 

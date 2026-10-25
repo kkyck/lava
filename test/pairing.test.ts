@@ -15,6 +15,8 @@ import {
 import {
     aesCtrDecrypt,
     aesCtrEncrypt,
+    aesGcmDecrypt,
+    hkdf,
     pbkdf2Sha256,
     utf8,
     x25519,
@@ -115,12 +117,73 @@ describe('companion handshake', () => {
 
         assert.ok(finish.wrappedKeyBundle.length > 0)
         assert.equal(finish.advSecret.length, 32)
-        assert.deepEqual(finish.companionIdentityPublic, registration.identityKeyPair.pubKey)
 
         // The shared ephemeral secret must match on both sides.
         const shared = x25519(companion.companionEphemeralPrivateKey, primaryPublic)
         const mirrored = x25519(primaryPrivate, companion.companionEphemeralPublicKey)
         assert.deepEqual(shared, mirrored)
+    })
+
+    it('puts the raw identity keys into the key bundle', async () => {
+        const companion = await createCompanionHello()
+        const registration = generateRegistrationInfo()
+        const primaryIdentityPub = new Uint8Array(32).fill(9)
+
+        // The identity key pair is kept in its serialized form — 33 bytes
+        // with the version byte — but the bundle carries the raw form: the
+        // phone compares the bundle against the raw key it owns.
+        assert.equal(registration.identityKeyPair.pubKey.length, 33)
+
+        const primaryPrivate = new Uint8Array(32).fill(7)
+        const primaryPublic = x25519PublicFromPrivate(primaryPrivate)
+        const primarySalt = new Uint8Array(32).fill(3)
+        const primaryCounter = new Uint8Array(16).fill(4)
+        const wrappedPrimary = new Uint8Array(32 + 16 + 32)
+        wrappedPrimary.set(primarySalt, 0)
+        wrappedPrimary.set(primaryCounter, 32)
+        wrappedPrimary.set(
+            aesCtrEncrypt(
+                pbkdf2Sha256(utf8(companion.pairingCode), primarySalt, 2 << 16, 32),
+                primaryCounter,
+                primaryPublic,
+            ),
+            48,
+        )
+
+        const finish = await completeCompanionFinish({
+            pairingCode: companion.pairingCode,
+            companionEphemeralPrivateKey: companion.companionEphemeralPrivateKey,
+            identityKeyPair: registration.identityKeyPair,
+            wrappedPrimaryEphemeralPub: wrappedPrimary,
+            primaryIdentityPub,
+        })
+
+        // The identity public key goes out in its raw form.
+        assert.equal(finish.companionIdentityPublic.length, 32)
+        assert.deepEqual(
+            finish.companionIdentityPublic,
+            registration.identityKeyPair.pubKey.subarray(1),
+        )
+
+        // The bundle is `salt ‖ iv ‖ ciphertext`; the plaintext holds the
+        // raw identity keys and the shared secret.
+        const bundleSalt = finish.wrappedKeyBundle.subarray(0, 32)
+        const bundleIv = finish.wrappedKeyBundle.subarray(32, 44)
+        const ciphertext = finish.wrappedKeyBundle.subarray(44)
+        const sharedEphemeral = x25519(
+            companion.companionEphemeralPrivateKey,
+            primaryPublic,
+        )
+        const bundleKey = hkdf(
+            sharedEphemeral,
+            bundleSalt,
+            utf8('link_code_pairing_key_bundle_encryption_key'),
+            32,
+        )
+        const plaintext = aesGcmDecrypt(bundleKey, bundleIv, ciphertext)
+        assert.deepEqual(plaintext.subarray(0, 32), finish.companionIdentityPublic)
+        assert.deepEqual(plaintext.subarray(32, 64), primaryIdentityPub)
+        assert.equal(plaintext.length, 96)
     })
 
     it('rejects a truncated wrapped payload', async () => {

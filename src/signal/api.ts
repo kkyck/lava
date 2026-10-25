@@ -19,6 +19,7 @@
 import { WA_IQ_TYPES, WA_NODE_TAGS, WA_XMLNS } from '../protocol/constants.js'
 import { HOST_DOMAIN, parseSignalAddressFromJid } from '../protocol/jid.js'
 import type { BinaryNode } from '../transport/binary/types.js'
+import { toRawPublicKey } from '../crypto/primitives.js'
 import {
     decodeNodeContentBytes,
     findNodeChild,
@@ -112,11 +113,6 @@ export function decodeExactLength(
     return bytes
 }
 
-/** Strips the `0x05` prefix from a serialized public key. */
-function toRawPubKey(key: Uint8Array): Uint8Array {
-    return key.length === 33 ? key.subarray(1) : key
-}
-
 /**
  * Builds the `<skey>` node.
  *
@@ -135,7 +131,7 @@ function buildSignedPreKeyNode(signedPreKey: SignedPreKeyRecord): BinaryNode {
             {
                 tag: WA_NODE_TAGS.VALUE,
                 attrs: {},
-                content: toRawPubKey(signedPreKey.keyPair.pubKey),
+                content: toRawPublicKey(signedPreKey.keyPair.pubKey),
             },
             {
                 tag: WA_NODE_TAGS.SIGNATURE,
@@ -162,7 +158,7 @@ export function buildPreKeyUploadIq(
         {
             tag: WA_NODE_TAGS.IDENTITY,
             attrs: {},
-            content: toRawPubKey(registrationInfo.identityKeyPair.pubKey),
+            content: toRawPublicKey(registrationInfo.identityKeyPair.pubKey),
         },
         {
             tag: WA_NODE_TAGS.REGISTRATION,
@@ -189,7 +185,7 @@ export function buildPreKeyUploadIq(
                     {
                         tag: WA_NODE_TAGS.VALUE,
                         attrs: {},
-                        content: toRawPubKey(record.keyPair.pubKey),
+                        content: toRawPublicKey(record.keyPair.pubKey),
                     },
                 ],
             })),

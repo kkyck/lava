@@ -43,7 +43,12 @@ import {
     type AppStateSyncResult,
 } from './appstate/sync.js'
 import { AppStateStore, type AppStateStoreSnapshot } from './appstate/store.js'
-import { toHex, generateX25519KeyPair, toSerializedPublicKey } from './crypto/primitives.js'
+import {
+    toHex,
+    generateX25519KeyPair,
+    toRawPublicKey,
+    toSerializedPublicKey,
+} from './crypto/primitives.js'
 import { randomBytesOf } from './crypto/primitives.js'
 import { hostOsName } from './util/host.js'
 import { QrFlow } from './qr/flow.js'
@@ -1723,9 +1728,11 @@ export class LavaClient extends EventEmitter {
                 wrappedNode.content,
                 'primary_hello.wrapped_primary_ephemeral_pub',
             ),
-            primaryIdentityPub: decodeNodeContentBytes(
-                identityNode.content,
-                'primary_hello.primary_identity_pub',
+            primaryIdentityPub: toRawPublicKey(
+                decodeNodeContentBytes(
+                    identityNode.content,
+                    'primary_hello.primary_identity_pub',
+                ),
             ),
         })
 

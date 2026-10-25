@@ -158,6 +158,23 @@ export class IqDispatcher {
         return true
     }
 
+    /**
+     * Drops a pending request without answering it.
+     *
+     * The promise of the request stays unsettled: it is dropped together
+     * with the request, so it cannot turn into an unhandled rejection.
+     *
+     * @param id The stanza id.
+     * @returns `true` when a pending request was found.
+     */
+    discard(id: string): boolean {
+        const request = this.pending.get(id)
+        if (!request) return false
+        this.pending.delete(id)
+        clearTimeout(request.timer)
+        return true
+    }
+
     /** Rejects every pending request, e.g. when the socket closes. */
     failAll(error: Error): void {
         for (const [id, request] of this.pending) {

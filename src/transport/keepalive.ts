@@ -99,7 +99,12 @@ export class KeepAlive {
         const offset = Math.floor(Math.random() * (jitterWindow * 2 + 1) - jitterWindow)
         this.timer = setTimeout(() => {
             this.timer = null
-            void this.run(generation)
+            /**
+             * A ping that fails must never take the host process down: the
+             * failure is reported through the callback, and whatever the
+             * callback does stays in its own hands.
+             */
+            void this.run(generation).catch(() => undefined)
         }, Math.max(1, this.intervalMs + offset))
         /**
          * The timer must not keep the process alive on its own: the socket
@@ -144,10 +149,17 @@ export class KeepAlive {
                 this.onClockSkewMs(serverT * 1000 - (startedAt + halfRttMs))
             }
         } catch (error) {
-            if (generation === this.generation) {
-                this.onFailure?.(
-                    error instanceof Error ? error : new Error(String(error)),
-                )
+            try {
+                if (generation === this.generation) {
+                    this.onFailure?.(
+                        error instanceof Error ? error : new Error(String(error)),
+                    )
+                }
+            } catch {
+                /**
+                 * A failure handler that throws must not turn the failed
+                 * ping into an unhandled rejection.
+                 */
             }
             this.inFlight = false
             this.schedule(generation)
