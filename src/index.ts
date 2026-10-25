@@ -332,6 +332,34 @@ export {
 } from './signal/manager.js'
 
 export {
+    deserializeIdentity,
+    deserializeInitialExchangeInfo,
+    deserializeMessageKey,
+    deserializeRecvChain,
+    deserializeSendChain,
+    deserializeSenderKeyMessageKey,
+    deserializeSenderKeyRecord,
+    deserializeSignalSession,
+    serializeIdentity,
+    serializeInitialExchangeInfo,
+    serializeMessageKey,
+    serializeRecvChain,
+    serializeSendChain,
+    serializeSenderKeyMessageKey,
+    serializeSenderKeyRecord,
+    serializeSignalSession,
+    type SerializedInitialExchangeInfo,
+    type SerializedMessageKey,
+    type SerializedRecvChain,
+    type SerializedSendChain,
+    type SerializedSenderKeyMessageKey,
+    type SerializedSenderKeyRecord,
+    type SerializedSenderKeyState,
+    type SerializedSignalIdentity,
+    type SerializedSignalSession,
+} from './signal/persistence.js'
+
+export {
     SenderKeyChain,
     SenderKeyManager,
     deriveSenderKeyMessageKey,

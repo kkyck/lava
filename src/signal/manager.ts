@@ -27,6 +27,11 @@ import {
 } from './session.js'
 import { SenderKeyManager, type GroupEncryptionResult } from './group.js'
 import { signalAddressKey, parseSignalAddressFromJid } from '../protocol/jid.js'
+import {
+    deserializeSignalSession,
+    serializeSignalSession,
+    type SerializedSignalSession,
+} from './persistence.js'
 
 /** A remote device's pre-key bundle. */
 export interface RemoteKeyBundle {
@@ -60,6 +65,21 @@ export interface SignalSessionManagerOptions {
      * @param id The id of the consumed pre-key.
      */
     onPreKeyConsumed?: (id: number) => void
+    /**
+     * Called when a double-ratchet session changed.
+     *
+     * The ratchet state cannot be recreated from the key material, so the
+     * caller has to persist it when this fires.
+     */
+    onSessionChanged?: () => void
+    /**
+     * Called when a group sender key changed.
+     *
+     * The chain key of a sender key advances with every group message and
+     * the received keys are the only way to decrypt a group message at all,
+     * so the caller has to persist them when this fires.
+     */
+    onSenderKeysChanged?: () => void
 }
 
 /** The result of encrypting for a peer. */
@@ -104,7 +124,9 @@ export class SignalSessionManager {
     constructor(options: SignalSessionManagerOptions = {}) {
         this.options = options
         this.keyStore = options.keyStore ?? new SignalKeyStore()
-        this.senderKeyManager = options.senderKeyManager ?? new SenderKeyManager()
+        this.senderKeyManager =
+            options.senderKeyManager ??
+            new SenderKeyManager({ onSenderKeysChanged: options.onSenderKeysChanged })
     }
 
     /**
@@ -123,7 +145,7 @@ export class SignalSessionManager {
      * @param session The session.
      */
     setSession(address: string, session: SignalSession): void {
-        this.sessions.set(SignalSessionManager.addressKey(address), session)
+        this.storeSession(SignalSessionManager.addressKey(address), session)
     }
 
     /** Removes the session for an address. */
@@ -131,9 +153,54 @@ export class SignalSessionManager {
         this.sessions.delete(SignalSessionManager.addressKey(address))
     }
 
+    /**
+     * Stores a session under an already normalised key.
+     *
+     * Every write goes through here, so the persistence callback fires for
+     * every change of the ratchet state.
+     *
+     * @param key The normalised address key.
+     * @param session The session.
+     */
+    private storeSession(key: string, session: SignalSession): void {
+        this.sessions.set(key, session)
+        this.options.onSessionChanged?.()
+    }
+
     /** Number of tracked sessions. */
     get sessionCount(): number {
         return this.sessions.size
+    }
+
+    /**
+     * Exports every tracked session.
+     *
+     * The double ratchet state cannot be recreated from the key material, so
+     * it has to survive a restart: a device that forgets it cannot decrypt
+     * the next message of an established conversation.
+     */
+    exportSessions(): Record<string, SerializedSignalSession> {
+        const out: Record<string, SerializedSignalSession> = {}
+        for (const [address, session] of this.sessions) {
+            out[address] = serializeSignalSession(session)
+        }
+        return out
+    }
+
+    /**
+     * Restores the sessions from an export.
+     *
+     * The existing sessions are replaced, so importing fully restores the
+     * state of the device.
+     *
+     * @param sessions The serialised sessions, keyed by address.
+     */
+    importSessions(sessions: Record<string, SerializedSignalSession> | undefined): void {
+        this.sessions.clear()
+        if (!sessions) return
+        for (const [address, session] of Object.entries(sessions)) {
+            this.sessions.set(address, deserializeSignalSession(session))
+        }
     }
 
     /** The address key used to index sessions. */
@@ -173,7 +240,7 @@ export class SignalSessionManager {
             },
             baseKey,
         )
-        this.sessions.set(key, session)
+        this.storeSession(key, session)
         this.keyStore.setRemoteIdentity(key, bundle.identity)
         return session
     }
@@ -191,7 +258,7 @@ export class SignalSessionManager {
             throw new Error(`signal: no session for ${peerAddress}`)
         }
         const result = encryptSignalMessage(session, plaintext)
-        this.sessions.set(key, result.session)
+        this.storeSession(key, result.session)
         return { ciphertext: result.result.ciphertext, encType: result.result.type }
     }
 
@@ -276,7 +343,7 @@ export class SignalSessionManager {
                 },
             )
             const result = decryptSignalMessage(session, preKey)
-            this.sessions.set(key, result.session)
+            this.storeSession(key, result.session)
             this.keyStore.setRemoteIdentity(key, preKey.remote.pubKey)
             return {
                 plaintext: result.plaintext,
@@ -291,7 +358,7 @@ export class SignalSessionManager {
         }
         const parsed = deserializeSignalMessage(payload)
         const result = decryptSignalMessage(session, parsed)
-        this.sessions.set(key, result.session)
+        this.storeSession(key, result.session)
         return {
             plaintext: result.plaintext,
             sender: senderAddress,

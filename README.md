@@ -66,7 +66,7 @@ await client.message.send('6281234567890@s.whatsapp.net', 'Hello from Lava')
 | Media upload / download | ✅ | ✅ | ✅ |
 | App-state sync (chat list, contacts) | ✅ | ⚠️ partial | ✅ |
 | Calls (signalling) | ✅ | ⚠️ partial | ⚠️ partial |
-| Bundle size | **~888 KB** raw JS | ~2.5 MB | ~4 MB |
+| Bundle size | **~901 KB** raw JS | ~2.5 MB | ~4 MB |
 
 **Zero dependencies means zero supply-chain risk.** Everything — the protobuf
 codec, the Signal double ratchet, XEdDSA, the Noise handshake, the QR encoder —
@@ -561,6 +561,19 @@ value MAC of every record). It has to survive a restart, otherwise the device
 would ask the server for a fresh snapshot on every connection. The store is
 plain JSON, so it costs nothing but a few kilobytes.
 
+The snapshot also holds the **double-ratchet sessions** — the root key, the
+chain keys and the ratchet keys of every conversation. This is the one piece
+of state that *cannot* be recreated from the key material: the ratchet
+advances with every message, so a device that forgets it cannot decrypt the
+next message of an established conversation. Lava writes the sessions to the
+snapshot as soon as they change, so a restart simply continues the
+conversation.
+
+The **sender keys** of the group chats are stored as well. A sender key is
+the group counterpart of a double-ratchet session: its chain key advances
+with every group message, and the keys received from the other participants
+are the only way to decrypt an inbound group message at all.
+
 The one-time pre-keys are handed out with **sequential ids**, exactly like the
 official clients do, so they are unique inside the device and always fit the
 three byte field the protocol uses for them. Signed pre-keys live in their own
@@ -628,15 +641,15 @@ first, so a long-lived device never piles up key material.
 ```text
 Lava memory benchmark
 ===================================================
-baseline (Node + library)    71.11 MB RSS
-+ 1 Signal session           73.73 MB RSS
-+ full pre-key pool (812)    75.85 MB RSS
+baseline (Node + library)    70.93 MB RSS
++ 1 Signal session           73.54 MB RSS
++ full pre-key pool (812)    75.91 MB RSS
 ===================================================
 session cost      2.61 MB
-pre-key pool cost 2.13 MB (812 pre-keys, 2.7 KB each)
-heap growth       3.98 MB
+pre-key pool cost 2.38 MB (812 pre-keys, 3.0 KB each)
+heap growth       4.00 MB
 upload batch      812 pre-keys per upload
-ciphertext        152 bytes
+ciphertext        151 bytes
 schema            520 messages / 2456 fields
 ```
 
@@ -651,16 +664,16 @@ runs — the numbers above are one representative run.)
 ```text
 Lava size report
 ==============================================
-compiled javascript    888.2 KB
-type declarations       319.9 KB
-typescript sources     1014.8 KB
+compiled javascript    900.7 KB
+type declarations       332.3 KB
+typescript sources     1.00 MB
 
 breakdown by module
 ----------------------------------------------
 proto        223.8 KB
 transport    191.0 KB
-(root)       107.1 KB
-signal        97.6 KB
+(root)       109.5 KB
+signal        107.7 KB
 appstate      64.2 KB
 protocol      50.0 KB
 crypto        40.6 KB
@@ -708,7 +721,7 @@ model, no code generation at runtime, one output buffer per message.
 ```bash
 npm run typecheck   # tsc --noEmit
 npm run build       # compile to dist/
-npm test            # 301 tests
+npm test            # 312 tests
 npm run bench       # memory benchmark
 npm run size        # size report
 ```

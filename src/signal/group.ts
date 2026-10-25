@@ -43,6 +43,12 @@ import {
     WHISPER_GROUP_INFO,
 } from './constants.js'
 import { generateSerializedKeyPair, type SerializedKeyPair } from './session.js'
+import {
+    deserializeSenderKeyRecord,
+    serializeSenderKeyRecord,
+    type SerializedSenderKeyRecord,
+    type SerializedSenderKeyState,
+} from './persistence.js'
 
 /** Length of the XEdDSA signature appended to every sender key message. */
 export const SENDER_KEY_SIGNATURE_LENGTH = 64
@@ -193,6 +199,14 @@ export class SenderKeyChain {
 export interface SenderKeyManagerOptions {
     /** Address of the local device; used as the owner of outgoing keys. */
     localAddress?: string
+    /**
+     * Called when a sender key changed.
+     *
+     * The chain key advances with every group message and the received keys
+     * are the only way to decrypt a group message at all, so the caller has
+     * to persist the state when this fires.
+     */
+    onSenderKeysChanged?: () => void
 }
 
 /**
@@ -208,6 +222,9 @@ export class SenderKeyManager {
     /** Address of the local device. */
     private readonly localAddress: string
 
+    /** The options the manager was created with. */
+    private readonly options: SenderKeyManagerOptions
+
     /** Own sender keys, keyed by group id. */
     private readonly ownKeys = new Map<string, SenderKeyRecord>()
 
@@ -218,7 +235,18 @@ export class SenderKeyManager {
      * @param options Optional configuration.
      */
     constructor(options: SenderKeyManagerOptions = {}) {
+        this.options = options
         this.localAddress = options.localAddress ?? ''
+    }
+
+    /**
+     * Reports a change of the sender-key state.
+     *
+     * Every write goes through here, so the persistence callback fires for
+     * every change of the chain keys.
+     */
+    private notifyChanged(): void {
+        this.options.onSenderKeysChanged?.()
     }
 
     /**
@@ -243,6 +271,7 @@ export class SenderKeyManager {
             unusedMessageKeys: [],
         }
         this.ownKeys.set(groupId, record)
+        this.notifyChanged()
         return record
     }
 
@@ -281,6 +310,7 @@ export class SenderKeyManager {
         const derived = deriveSenderKeyMessageKey(record.iteration, record.chainKey)
         record.chainKey = derived.nextChainKey
         record.iteration = derived.messageKey.iteration + 1
+        this.notifyChanged()
 
         const distributionPayload = encode('SenderKeyDistributionMessage', {
             id: record.keyId,
@@ -329,6 +359,7 @@ export class SenderKeyManager {
             unusedMessageKeys: [],
         }
         this.receivedKeys.set(receiverKey(groupId, sender), record)
+        this.notifyChanged()
         return record
     }
 
@@ -361,7 +392,47 @@ export class SenderKeyManager {
         const plaintext = aesCbcDecryptFromSeed(selected.messageKey.seed, parsed.ciphertext)
         // Only persist the advanced state after a successful decryption.
         this.receivedKeys.set(receiverKey(groupId, sender), selected.record)
+        this.notifyChanged()
         return plaintext
+    }
+
+    /**
+     * Exports the sender-key state.
+     *
+     * The chain key of a sender key advances with every message, and the
+     * received keys are the only way to decrypt a group message at all. Both
+     * have to survive a restart.
+     */
+    exportState(): SerializedSenderKeyState {
+        const own: Record<string, SerializedSenderKeyRecord> = {}
+        const received: Record<string, SerializedSenderKeyRecord> = {}
+        for (const [groupId, record] of this.ownKeys) {
+            own[groupId] = serializeSenderKeyRecord(record)
+        }
+        for (const [key, record] of this.receivedKeys) {
+            received[key] = serializeSenderKeyRecord(record)
+        }
+        return { own, received }
+    }
+
+    /**
+     * Restores the sender-key state from an export.
+     *
+     * The existing state is replaced, so importing fully restores the state
+     * of the device.
+     *
+     * @param state The serialised state.
+     */
+    importState(state: SerializedSenderKeyState | undefined): void {
+        this.ownKeys.clear()
+        this.receivedKeys.clear()
+        if (!state) return
+        for (const [groupId, record] of Object.entries(state.own ?? {})) {
+            this.ownKeys.set(groupId, deserializeSenderKeyRecord(record))
+        }
+        for (const [key, record] of Object.entries(state.received ?? {})) {
+            this.receivedKeys.set(key, deserializeSenderKeyRecord(record))
+        }
     }
 }
 

@@ -471,6 +471,44 @@ export class LavaClient extends EventEmitter {
             onPreKeyConsumed: (id) => {
                 this.forgetPreKey(id)
             },
+            // The ratchet state cannot be recreated from the key material, so
+            // it is persisted as soon as it changes.
+            onSessionChanged: () => {
+                this.persistSessions()
+            },
+            // The sender keys of the group chats advance with every message,
+            // so they are persisted as soon as they change too.
+            onSenderKeysChanged: () => {
+                this.persistSenderKeys()
+            },
+        })
+    }
+
+    /**
+     * Persists the double-ratchet sessions.
+     *
+     * The write is queued with the other credential writes, so two
+     * overlapping writes cannot overwrite each other.
+     */
+    private persistSessions(): void {
+        if (!this.credentials) return
+        const sessions = this.signal.exportSessions()
+        void this.updateCredentials({ sessions }).catch((error: unknown) => {
+            this.emit(LavaClient.ERROR, error instanceof Error ? error : new Error(String(error)))
+        })
+    }
+
+    /**
+     * Persists the sender keys of the group chats.
+     *
+     * The write is queued with the other credential writes, so two
+     * overlapping writes cannot overwrite each other.
+     */
+    private persistSenderKeys(): void {
+        if (!this.credentials) return
+        const senderKeys = this.signal.senderKeyManager.exportState()
+        void this.updateCredentials({ senderKeys }).catch((error: unknown) => {
+            this.emit(LavaClient.ERROR, error instanceof Error ? error : new Error(String(error)))
         })
     }
 
@@ -913,6 +951,13 @@ export class LavaClient extends EventEmitter {
         if (snapshot.appState) {
             this.appStateStore.mergeSnapshot(snapshot.appState)
         }
+        // The double-ratchet sessions are restored too: the ratchet state
+        // cannot be recreated from the key material, so without it the next
+        // message of an established conversation could not be decrypted.
+        this.signal.importSessions(snapshot.sessions)
+        // The sender keys of the group chats are restored as well: they are
+        // the only way to decrypt an inbound group message.
+        this.signal.senderKeyManager.importState(snapshot.senderKeys)
     }
 
     /**

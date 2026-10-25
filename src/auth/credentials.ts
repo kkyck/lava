@@ -19,6 +19,10 @@ import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 import type { AppStateStoreSnapshot } from '../appstate/store.js'
+import type {
+    SerializedSenderKeyState,
+    SerializedSignalSession,
+} from '../signal/persistence.js'
 
 /** A serialised key pair. */
 export interface StoredKeyPair {
@@ -132,6 +136,23 @@ export interface CredentialSnapshot {
      * server for a fresh snapshot every time it connects.
      */
     appState?: AppStateStoreSnapshot
+    /**
+     * The double-ratchet sessions of the device, keyed by Signal address.
+     *
+     * The ratchet state cannot be recreated from the key material: the root
+     * key, the chain keys and the ratchet keys all evolve with every
+     * message. A device that forgets them cannot decrypt the next message
+     * of an established conversation, so they have to survive a restart.
+     */
+    sessions?: Record<string, SerializedSignalSession>
+    /**
+     * The sender keys of the group chats, keyed by group id.
+     *
+     * The chain key of a sender key advances with every message, and the
+     * received keys are the only way to decrypt a group message at all, so
+     * they have to survive a restart as well.
+     */
+    senderKeys?: SerializedSenderKeyState
 }
 
 /**
