@@ -49,6 +49,7 @@ import {
     extractSenderKeyDistribution,
     hasMessageContent,
     prepareOutboundPlaintext,
+    prepareSenderKeyDistributionPayload,
     resolveInboundMessageKey,
     summarizeMessageBody,
     stripInboundPadding,
@@ -75,8 +76,10 @@ import {
     getLoginIdentity,
     isGroupJid,
     parsePhoneJid,
+    parseSignalAddressFromJid,
     splitJid,
     toUserJid,
+    type JidParts,
 } from './protocol/jid.js'
 import {
     WA_DEFAULTS,
@@ -161,6 +164,7 @@ import {
 import {
     buildDirectMessageFanoutNode,
     buildGroupSenderKeyMessageNode,
+    buildRetryMessageNode,
     type EncryptedParticipant,
 } from './transport/node/builders/message.js'
 import {
@@ -192,8 +196,15 @@ import {
 import { assertIqResult, parseIqError } from './transport/node/query.js'
 import { generateMessageId, generateRandomId } from './util/message-id.js'
 import { buildWhatsAppQrPayload } from './qr/whatsapp.js'
-import { parseGroupMetadata, parseGroupParticipants } from './protocol/group.js'
+import {
+    GroupMetadataCache,
+    parseGroupMetadata,
+    parseGroupParticipants,
+} from './protocol/group.js'
 import type { GroupMetadata, GroupParticipant } from './protocol/group.js'
+import { parseRetryReceipt } from './protocol/retry.js'
+import type { RetryRequest } from './protocol/retry.js'
+import { OutboundMessageCache } from './message/outbound-cache.js'
 
 /** The transport a client runs on. */
 export type WaTransportMode = 'mobile' | 'web'
@@ -205,6 +216,14 @@ export type WaTransportMode = 'mobile' | 'web'
  * asking again, so the retries stop after a few attempts.
  */
 const MAX_RETRY_COUNT = 3
+
+/**
+ * The number of times a peer may ask for a message to be sent again.
+ *
+ * A message that could not be decrypted once will not become decryptable by
+ * asking again and again, so the answers stop after a few attempts.
+ */
+const MAX_REMOTE_RETRY_COUNT = 3
 
 /** The connection states a client moves through. */
 export type WaConnectionState =
@@ -438,6 +457,9 @@ export class LavaClient extends EventEmitter {
     private readonly keyStore: SignalKeyStore
     private readonly signal: SignalSessionManager
     private readonly deviceList = new DeviceListStore()
+    private readonly groupParticipants = new GroupMetadataCache()
+    private readonly outboundMessages = new OutboundMessageCache()
+    private readonly resendCounts = new Map<string, number>()
     private readonly mediaConn = new MediaConnectionCache()
     private readonly appStateStore = new AppStateStore()
     private readonly pendingAppState: AppStatePendingMutation[] = []
@@ -519,6 +541,20 @@ export class LavaClient extends EventEmitter {
         this.logger.log({
             level: 'warn',
             message: `unhandled client error: ${failure.message}`,
+        })
+    }
+
+    /**
+     * Writes a debug record.
+     *
+     * @param message The message.
+     * @param fields Additional structured fields.
+     */
+    private logDebug(message: string, fields?: Record<string, unknown>): void {
+        this.logger.log({
+            level: 'debug',
+            message,
+            ...(fields ? { fields } : {}),
         })
     }
 
@@ -1821,6 +1857,10 @@ export class LavaClient extends EventEmitter {
     /**
      * Handles an inbound `<receipt>` stanza.
      *
+     * A receipt of the type `retry` is not a status report: it says that the
+     * peer could not decrypt the message and asks for it to be sent again.
+     * Such a receipt is answered right away.
+     *
      * @param node The stanza.
      */
     private handleReceipt(node: BinaryNode): void {
@@ -1831,6 +1871,174 @@ export class LavaClient extends EventEmitter {
             ...(node.attrs.participant ? { participant: node.attrs.participant } : {}),
         }
         this.emit(LavaClient.RECEIPT, event)
+
+        const request = parseRetryReceipt(node)
+        if (request) {
+            void this.handleRetryRequest(request)
+        }
+    }
+
+    /**
+     * Answers a retry request of a peer.
+     *
+     * The peer could not decrypt a message of ours and asks for it to be
+     * sent again. The answer is the very same message, encrypted for the
+     * device that asked — this time with a key the device knows.
+     *
+     * The request is ignored when the message is not known any more, when it
+     * was asked for too often, or when the peer is not the recipient of the
+     * message: a peer that was never sent a message has no business asking
+     * for it.
+     *
+     * @param request The request.
+     */
+    private async handleRetryRequest(request: RetryRequest): Promise<void> {
+        try {
+            if (request.retryCount > MAX_REMOTE_RETRY_COUNT) {
+                this.logDebug('retry request ignored: the retry limit was reached')
+                return
+            }
+
+            const outbound = this.outboundMessages.get(request.originalMsgId)
+            if (!outbound) {
+                this.logDebug('retry request ignored: the message is unknown')
+                return
+            }
+
+            const requesterJid = request.participant ?? request.from
+            if (!requesterJid) return
+
+            if (!this.isRetryRequesterAllowed(outbound, requesterJid)) {
+                this.logDebug('retry request ignored: the requester is not the recipient')
+                return
+            }
+
+            /**
+             * The peer counts the retries itself, but a peer that always
+             * claims to be the first attempt must not keep the client busy
+             * either.
+             */
+            const counterKey = `${request.originalMsgId}|${requesterJid}`
+            const attempts = (this.resendCounts.get(counterKey) ?? 0) + 1
+            if (attempts > MAX_REMOTE_RETRY_COUNT) {
+                this.logDebug('retry request ignored: the device asked too often', {
+                    id: request.originalMsgId,
+                    requester: requesterJid,
+                })
+                return
+            }
+            this.resendCounts.set(counterKey, attempts)
+
+            const address = parseSignalAddressFromJid(requesterJid)
+            await this.prepareRetrySession(request, requesterJid)
+
+            const encrypted = this.signal.encryptForDevice(requesterJid, outbound.plaintext)
+
+            if (outbound.isGroup) {
+                /**
+                 * The device could not read the message, so it did not get the
+                 * sender key either. The next message has to carry the
+                 * distribution again.
+                 */
+                this.signal.senderKeyManager.forgetDistribution(outbound.to, address)
+            }
+
+            this.send(
+                buildRetryMessageNode(
+                    {
+                        to: outbound.isGroup ? outbound.to : requesterJid,
+                        type: outbound.type,
+                        id: request.originalMsgId,
+                        ...(outbound.mediatype ? { mediatype: outbound.mediatype } : {}),
+                    },
+                    encrypted.encType,
+                    encrypted.ciphertext,
+                    request.retryCount,
+                    outbound.isGroup ? requesterJid : undefined,
+                ),
+            )
+            this.logDebug('retry request answered', {
+                id: request.originalMsgId,
+                requester: requesterJid,
+            })
+        } catch (error) {
+            this.emitError(error)
+        }
+    }
+
+    /**
+     * Decides whether a peer may ask for a message to be sent again.
+     *
+     * A peer may only ask for a message that was addressed to it. The one
+     * exception is our own other devices: they receive the messages of the
+     * account as well.
+     *
+     * @param outbound The message.
+     * @param requesterJid The device that asked.
+     */
+    private isRetryRequesterAllowed(
+        outbound: { to: string; isGroup: boolean },
+        requesterJid: string,
+    ): boolean {
+        if (outbound.isGroup) {
+            // Every member of a group may ask for the messages of the group.
+            const members = this.groupParticipants.get(outbound.to)?.participants
+            if (!members || members.length === 0) return true
+            const requesterUser = toUserJid(requesterJid)
+            return members.some(
+                (member) =>
+                    toUserJid(member.jid) === requesterUser ||
+                    (member.phoneJid ? toUserJid(member.phoneJid) === requesterUser : false),
+            )
+        }
+
+        const meJid = this.credentials?.meJid
+        const requesterUser = toUserJid(requesterJid)
+        if (toUserJid(outbound.to) === requesterUser) return true
+        return meJid ? toUserJid(meJid) === requesterUser : false
+    }
+
+    /**
+     * Makes sure a session with the device that asked for a retry exists.
+     *
+     * The peer usually sends its key bundle along with the request, so the
+     * session can be rebuilt without asking the server. A peer that re-uses
+     * the registration id of another device invalidates the old session: the
+     * keys of the new device are needed to talk to it.
+     *
+     * @param request The request.
+     * @param requesterJid The device that asked.
+     * @param address The address of the device.
+     */
+    private async prepareRetrySession(
+        request: RetryRequest,
+        requesterJid: string,
+    ): Promise<void> {
+        const bundle = request.keyBundle
+        const session = this.signal.getSession(requesterJid)
+
+        /**
+         * A peer that re-uses the registration id of another device
+         * invalidates the old session: the keys of the new device are
+         * needed to talk to it.
+         */
+        if (session && request.regId && session.remote.regId !== request.regId) {
+            this.signal.removeSession(requesterJid)
+        }
+
+        if (bundle) {
+            // The peer sent its keys along with the request, so the session
+            // can be rebuilt without asking the server.
+            this.signal.ensureSession(requesterJid, {
+                regId: request.regId ?? 0,
+                identity: bundle.identity,
+                signedKey: bundle.signedKey,
+                oneTimeKey: bundle.oneTimeKey ?? null,
+            })
+            return
+        }
+
+        await this.ensureSignalSession(requesterJid)
     }
 
     /**
@@ -2731,9 +2939,13 @@ export class LavaClient extends EventEmitter {
          * @param groupJid The group.
          */
         metadata: async (groupJid: string): Promise<GroupMetadata> => {
+            const cached = this.groupParticipants.get(groupJid)
+            if (cached) return cached
             const response = await this.query(buildGetGroupMetadataIq(groupJid))
             assertIqResult(response, 'group metadata')
-            return parseGroupMetadata(response)
+            const metadata = parseGroupMetadata(response)
+            this.groupParticipants.set(groupJid, metadata)
+            return metadata
         },
 
         /**
@@ -2742,9 +2954,20 @@ export class LavaClient extends EventEmitter {
          * @param groupJid The group.
          */
         participants: async (groupJid: string): Promise<GroupParticipant[]> => {
-            const response = await this.query(buildGetGroupMetadataIq(groupJid))
-            assertIqResult(response, 'group participants')
-            return parseGroupParticipants(response)
+            return this.queryGroupParticipants(groupJid)
+        },
+
+        /**
+         * Drops the cached membership of a group.
+         *
+         * The next read asks the group server again. The server refuses a
+         * client that queries the same group too often, so the membership is
+         * only refreshed when it is really needed.
+         *
+         * @param groupJid The group.
+         */
+        refresh: (groupJid: string): void => {
+            this.groupParticipants.invalidate(groupJid)
         },
     }
 
@@ -2970,6 +3193,20 @@ export class LavaClient extends EventEmitter {
         const plaintext = prepareOutboundPlaintext(body)
         const attrs = resolveOutboundMessageAttrs(body)
 
+        /**
+         * The plaintext is kept for a while: a peer that cannot decrypt the
+         * message asks for it to be sent again, and the answer needs the
+         * original plaintext.
+         */
+        this.outboundMessages.set(id, {
+            to,
+            plaintext,
+            type: attrs.typeAttr,
+            isGroup: isGroupJid(to),
+            ...(attrs.mediatype ? { mediatype: attrs.mediatype } : {}),
+            sentAtMs: Date.now(),
+        })
+
         if (isGroupJid(to)) {
             await this.sendGroupMessage(to, id, plaintext, attrs)
         } else {
@@ -3047,18 +3284,54 @@ export class LavaClient extends EventEmitter {
         const distribution = group.distributionMessage
         if (!distribution) throw new Error('client: no sender key distribution was produced')
 
+        /**
+         * The distribution travels to the participants as a pairwise payload:
+         * the receiver decodes it as a `Message` and picks the distribution
+         * out of the `senderKeyDistributionMessage` field.
+         */
+        const distributionPayload = prepareSenderKeyDistributionPayload(
+            groupJid,
+            distribution,
+        )
+
+        /**
+         * Only the devices that do not know the sender key yet need the
+         * distribution. Sending it to every device of every member again
+         * would multiply the size of the stanza for nothing.
+         */
+        const senderKeyId = group.senderKeyId ?? 0
+        const pendingAddresses = this.signal.senderKeyManager
+            .filterParticipantsNeedingDistribution(
+                groupJid,
+                senderKeyId,
+                devices.map((device) => parseSignalAddressFromJid(device.jid)),
+            )
+        const pendingJids = new Set(
+            pendingAddresses.map((address) => `${address.user}|${address.server}|${address.device}`),
+        )
+
         const participants: EncryptedParticipant[] = []
-        const phashTargets: string[] = []
+        const distributed: JidParts[] = []
         for (const device of devices) {
+            const address = parseSignalAddressFromJid(device.jid)
+            const key = `${address.user}|${address.server}|${address.device}`
+            if (!pendingJids.has(key)) continue
             await this.ensureSignalSession(device.jid)
-            const encrypted = this.signal.encryptForDevice(device.jid, distribution)
+            const encrypted = this.signal.encryptForDevice(device.jid, distributionPayload)
             participants.push({
                 jid: device.jid,
                 encType: encrypted.encType,
                 ciphertext: encrypted.ciphertext,
             })
-            phashTargets.push(device.jid)
+            distributed.push(address)
         }
+        this.signal.senderKeyManager.markSenderKeyDistributed(
+            groupJid,
+            senderKeyId,
+            distributed,
+        )
+
+        const phashTargets: string[] = devices.map((device) => device.jid)
         const meJid = this.credentials?.meJid
         if (meJid) phashTargets.push(meJid)
 
@@ -3101,7 +3374,7 @@ export class LavaClient extends EventEmitter {
     private async resolveGroupDevices(groupJid: string): Promise<DeviceEntry[]> {
         const participants = await this.queryGroupParticipants(groupJid)
         if (participants.length === 0) return []
-        const entries = await this.queryDeviceLists(participants)
+        const entries = await this.queryDeviceLists(participants.map((p) => p.jid))
         const out: DeviceEntry[] = []
         for (const entry of entries) out.push(...entry.devices)
         return out
@@ -3133,16 +3406,36 @@ export class LavaClient extends EventEmitter {
      * identity (LID) when the group uses that addressing mode, and by their
      * phone number otherwise.
      *
+     * The answer is cached: the group server refuses a client that asks for
+     * the member list of the same group over and over.
+     *
      * @param groupJid The group.
+     * @param refresh Whether the cached answer may be ignored.
      */
-    private async queryGroupParticipants(groupJid: string): Promise<string[]> {
+    private async queryGroupParticipants(
+        groupJid: string,
+        refresh = false,
+    ): Promise<GroupParticipant[]> {
+        if (!refresh) {
+            const cached = this.groupParticipants.get(groupJid)
+            if (cached) return cached.participants
+        }
         const response = await this.query(buildGetGroupMetadataIq(groupJid))
         assertIqResult(response, 'group participants')
-        const out: string[] = []
-        for (const participant of parseGroupParticipants(response)) {
-            out.push(participant.jid)
+        const participants = parseGroupParticipants(response)
+        /**
+         * The very same answer holds the settings of the group as well, so
+         * the whole metadata is cached: a later read of the metadata does
+         * not have to ask the server again.
+         */
+        let metadata: GroupMetadata = { jid: groupJid, participants }
+        try {
+            metadata = parseGroupMetadata(response)
+        } catch {
+            // The answer held no group node; the member list is what matters.
         }
-        return out
+        this.groupParticipants.set(groupJid, metadata)
+        return participants
     }
 
     /**

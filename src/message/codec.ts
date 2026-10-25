@@ -56,6 +56,32 @@ export function prepareOutboundPlaintext(body: MessageContent): Uint8Array {
 }
 
 /**
+ * Builds the pairwise payload that carries a sender-key distribution.
+ *
+ * The distribution is not sent as a bare protobuf: it travels in the
+ * `senderKeyDistributionMessage` field of a `Message`, because that is the
+ * shape the receiver decodes the pairwise plaintext as. The payload is
+ * padded like every other message body.
+ *
+ * @param groupId The group the sender key belongs to.
+ * @param distribution The versioned sender-key distribution message.
+ * @returns The padded plaintext that goes into the `<enc>` entry.
+ */
+export function prepareSenderKeyDistributionPayload(
+    groupId: string,
+    distribution: Uint8Array,
+): Uint8Array {
+    return writeRandomPadMax16(
+        encodeMessageBody({
+            senderKeyDistributionMessage: {
+                groupId,
+                axolotlSenderKeyDistributionMessage: distribution,
+            },
+        }),
+    )
+}
+
+/**
  * Strips the padding from an inbound plaintext.
  *
  * @param plaintext The decrypted plaintext.

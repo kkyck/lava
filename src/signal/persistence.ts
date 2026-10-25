@@ -398,6 +398,13 @@ export interface SerializedSenderKeyState {
     own: Record<string, SerializedSenderKeyRecord>
     /** The received sender keys, keyed by `groupId \u0000 sender`. */
     received: Record<string, SerializedSenderKeyRecord>
+    /**
+     * The sender-key distribution each device received, keyed by
+     * `groupId \u0000 user|server|device`.
+     *
+     * The value is the id of the sender key the device was told about.
+     */
+    distributions?: Record<string, number>
 }
 
 /**

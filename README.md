@@ -42,6 +42,7 @@ await client.message.send('6281234567890@s.whatsapp.net', 'Hello from Lava')
   - [`client.auth`](#clientauth)
   - [`client.registration`](#clientregistration)
   - [Events](#events)
+- [Delivery guarantees](#delivery-guarantees)
 - [Credentials](#credentials)
 - [Security](#security)
 - [Memory footprint](#memory-footprint)
@@ -434,6 +435,11 @@ await client.group.leave([groupJid])
 // The member list and the settings of the group.
 const metadata = await client.group.metadata(groupJid)
 const members = await client.group.participants(groupJid)
+
+// The group server refuses a client that asks for the member list of the
+// same group over and over, so the answer is cached. Drop the cache when
+// the membership really changed.
+client.group.refresh(groupJid)
 ```
 
 ### `client.profile`
@@ -510,6 +516,43 @@ See [Registering a phone number](#registering-a-phone-number) for the details.
 | `receipt` | `WaReceipt` |
 | `call` | `WaCallEvent` |
 | `error` | `Error` |
+
+---
+
+## Delivery guarantees
+
+WhatsApp delivers a message over a *pairwise* Signal session — and over a
+*group* sender key for group chats. Both can fail in ways the server never
+reports: the recipient reinstalled the app, the pre-key expired, a device was
+restored from a backup.
+
+### Retries from the peer
+
+A peer that cannot read a message answers with a `<receipt type="retry">`
+stanza. Lava answers it automatically:
+
+- The plaintext of the recent messages is kept in a small, bounded cache
+  (five minutes, 256 messages) so the answer can be re-encrypted. The
+  ciphertext cannot be reused — the peer could not read it in the first place.
+- The message is encrypted again for the *device* that asked. For a group
+  message the stanza names the device in its `participant` attribute, so only
+  that device receives the copy.
+- The sender key of a group is remembered per device: a device that already
+  knows it does not get the distribution again, and a device that asked for a
+  retry gets it with the next message.
+- A peer that was never the recipient of the message cannot make the client
+  send it again, and the number of attempts per device is capped.
+
+### Retries towards the peer
+
+When a message arrives that Lava cannot decrypt, it asks the server to send
+it again with a `<receipt type="retry">` stanza of its own. The counter of
+the attempt is raised with every try, and the stanza is only sent a few
+times: a message that cannot be decrypted once will not become decryptable by
+asking again, and an endless retry loop would keep the server busy.
+
+Both directions are silent by design — nothing has to be enabled, and no
+event fires for a message that is only re-sent.
 
 ### Plugging in your own transport
 
@@ -651,20 +694,20 @@ first, so a long-lived device never piles up key material.
 ```text
 Lava memory benchmark
 ===================================================
-baseline (Node + library)    70.93 MB RSS
-+ 1 Signal session           73.54 MB RSS
-+ full pre-key pool (812)    75.91 MB RSS
+baseline (Node + library)    70.98 MB RSS
++ 1 Signal session           73.72 MB RSS
++ full pre-key pool (812)    76.22 MB RSS
 ===================================================
-session cost      2.61 MB
-pre-key pool cost 2.38 MB (812 pre-keys, 3.0 KB each)
-heap growth       4.00 MB
+session cost      2.74 MB
+pre-key pool cost 2.50 MB (812 pre-keys, 3.2 KB each)
+heap growth       689.0 KB
 upload batch      812 pre-keys per upload
-ciphertext        151 bytes
-schema            520 messages / 2456 fields
+ciphertext        152 bytes
+schema            532 messages / 2504 fields
 ```
 
 The library itself adds roughly **3 MB** to a Node.js process, most of which
-is the 520-message protobuf schema and the V8 heap churn of the benchmark
+is the 532-message protobuf schema and the V8 heap churn of the benchmark
 itself. A single Signal session costs well under a megabyte of live key
 material. (The resident set size moves by a few hundred kilobytes between
 runs — the numbers above are one representative run.)
@@ -674,23 +717,23 @@ runs — the numbers above are one representative run.)
 ```text
 Lava size report
 ==============================================
-compiled javascript    900.7 KB
-type declarations       332.3 KB
-typescript sources     1.00 MB
+compiled javascript    968.0 KB
+type declarations       363.3 KB
+typescript sources     1.09 MB
 
 breakdown by module
 ----------------------------------------------
-proto        223.8 KB
-transport    191.0 KB
-(root)       109.5 KB
-signal        107.7 KB
+proto        227.6 KB
+transport    191.1 KB
+signal       140.3 KB
+(root)       125.8 KB
 appstate      64.2 KB
-protocol      50.0 KB
+protocol      59.9 KB
 crypto        40.6 KB
 auth          38.2 KB
 qr            35.0 KB
 media         22.5 KB
-message       12.3 KB
+message       16.8 KB
 util           5.9 KB
 ----------------------------------------------
 
@@ -707,8 +750,8 @@ src/
 ├── appstate/          the app-state sync: crypto, keys, store, sync client
 ├── auth/              credentials, the pairing handshake, the SMS registration
 ├── crypto/            primitives, XEdDSA, the Noise handshake
-├── message/           the message codec: padding, secrets, body extraction
-├── proto/             the schema-driven protobuf codec (520 messages)
+├── message/           the message codec: padding, secrets, body extraction, cache
+├── proto/             the schema-driven protobuf codec (532 messages)
 ├── protocol/          JID helpers, message bodies, protocol constants
 ├── qr/                the QR encoder and the WhatsApp pairing payload
 ├── signal/            the double ratchet, key store, group sender keys
@@ -731,7 +774,7 @@ model, no code generation at runtime, one output buffer per message.
 ```bash
 npm run typecheck   # tsc --noEmit
 npm run build       # compile to dist/
-npm test            # 312 tests
+npm test            # 385 tests
 npm run bench       # memory benchmark
 npm run size        # size report
 ```

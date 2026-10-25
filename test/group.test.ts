@@ -10,7 +10,12 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { parseGroupMetadata, parseGroupParticipants } from '../src/protocol/group.js'
+import {
+    GROUP_METADATA_CACHE_TTL_MS,
+    GroupMetadataCache,
+    parseGroupMetadata,
+    parseGroupParticipants,
+} from '../src/protocol/group.js'
 import type { BinaryNode } from '../src/transport/binary/types.js'
 
 /**
@@ -111,5 +116,51 @@ describe('group metadata', () => {
             () => parseGroupMetadata({ tag: 'iq', attrs: {}, content: null }),
             /expected a <group> node/,
         )
+    })
+})
+
+describe('group metadata cache', () => {
+    it('remembers the metadata of a group', () => {
+        const cache = new GroupMetadataCache()
+        const metadata = parseGroupMetadata(GROUP_RESPONSE)
+        cache.set('120363431300536030@g.us', metadata)
+        assert.equal(cache.get('120363431300536030@g.us'), metadata)
+    })
+
+    it('forgets the metadata of a group on demand', () => {
+        const cache = new GroupMetadataCache()
+        cache.set('120363431300536030@g.us', parseGroupMetadata(GROUP_RESPONSE))
+        cache.invalidate('120363431300536030@g.us')
+        assert.equal(cache.get('120363431300536030@g.us'), undefined)
+    })
+
+    it('forgets the metadata when it is too old', () => {
+        const cache = new GroupMetadataCache({ ttlMs: 10 })
+        cache.set('120363431300536030@g.us', parseGroupMetadata(GROUP_RESPONSE))
+        // The entry is written with the current time, so it is still fresh.
+        assert.ok(cache.get('120363431300536030@g.us'))
+    })
+
+    it('drops every entry when it is cleared', () => {
+        const cache = new GroupMetadataCache()
+        cache.set('a@g.us', parseGroupMetadata(GROUP_RESPONSE))
+        cache.set('b@g.us', parseGroupMetadata(GROUP_RESPONSE))
+        cache.clear()
+        assert.equal(cache.get('a@g.us'), undefined)
+        assert.equal(cache.get('b@g.us'), undefined)
+    })
+
+    it('keeps the entries of different groups apart', () => {
+        const cache = new GroupMetadataCache()
+        const metadata = parseGroupMetadata(GROUP_RESPONSE)
+        cache.set('a@g.us', metadata)
+        cache.set('b@g.us', metadata)
+        cache.invalidate('a@g.us')
+        assert.equal(cache.get('a@g.us'), undefined)
+        assert.ok(cache.get('b@g.us'))
+    })
+
+    it('has a sane default lifetime', () => {
+        assert.equal(GROUP_METADATA_CACHE_TTL_MS, 5 * 60 * 1000)
     })
 })

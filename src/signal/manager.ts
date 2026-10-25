@@ -93,6 +93,8 @@ export interface EncryptedForPeer {
     encType: string
     /** The sender-key distribution message, for group chats. */
     distributionMessage?: Uint8Array
+    /** The id of the sender key, for group chats. */
+    senderKeyId?: number
 }
 
 /** A decrypted inbound payload. */
@@ -277,6 +279,7 @@ export class SignalSessionManager {
             ciphertext: result.ciphertext,
             encType: 'skmsg',
             distributionMessage: result.distributionMessage,
+            senderKeyId: result.keyId,
         }
     }
 

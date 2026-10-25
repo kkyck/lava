@@ -30,6 +30,13 @@ export interface EncryptedParticipant {
     encType: string
     /** The ciphertext. */
     ciphertext: Uint8Array
+    /**
+     * The retry counter of the payload.
+     *
+     * A payload that is sent again after a retry request carries the number
+     * of the attempt, so the peer can tell the copies apart.
+     */
+    count?: number
 }
 
 /** Options shared by the message builders. */
@@ -48,6 +55,14 @@ export interface MessageNodeOptions {
     mediatype?: string
     /** The `decrypt-fail` attribute. */
     decryptFail?: string
+    /**
+     * The `participant` attribute.
+     *
+     * For a group message that is addressed to a single participant — the
+     * answer to a retry request — it names the participant the message is
+     * for, so that the server delivers it to that participant alone.
+     */
+    participant?: string
     /** Extra stanza attributes. */
     additionalAttributes?: Record<string, string>
 }
@@ -89,6 +104,7 @@ function buildMessageAttrs(options: MessageNodeOptions): Record<string, string> 
     if (options.id) attrs.id = options.id
     if (options.edit) attrs.edit = options.edit
     if (options.phash) attrs.phash = options.phash
+    if (options.participant) attrs.participant = options.participant
     if (options.additionalAttributes) Object.assign(attrs, options.additionalAttributes)
     return attrs
 }
@@ -115,7 +131,12 @@ export function buildEncryptedToNodes(
             content: [
                 {
                     tag: WA_MESSAGE_TAGS.ENC,
-                    attrs: buildEncAttrs(participant.encType, mediatype, undefined, decryptFail),
+                    attrs: buildEncAttrs(
+                        participant.encType,
+                        mediatype,
+                        participant.count,
+                        decryptFail,
+                    ),
                     content: participant.ciphertext,
                 },
             ],
@@ -184,6 +205,49 @@ export function buildGroupSenderKeyMessageNode(
 /**
  * Builds a retry stanza for a message that could not be delivered.
  *
+ * The stanza carries the message again, this time encrypted for the device
+ * that asked for it. The `count` attribute of the `<enc>` node tells the
+ * peer how often the message was already sent.
+ *
+ * A group message is addressed to the group but names the device that
+ * asked for the retry in its `participant` attribute, so that only that
+ * device receives the copy.
+ *
+ * @param options The message options.
+ * @param encType The ciphertext kind.
+ * @param ciphertext The ciphertext.
+ * @param retryCount The retry counter.
+ * @param requesterJid The device that asked for the retry.
+ */
+export function buildRetryMessageNode(
+    options: MessageNodeOptions,
+    encType: string,
+    ciphertext: Uint8Array,
+    retryCount: number,
+    requesterJid?: string,
+): BinaryNode {
+    const attrs: Record<string, string> = {
+        to: options.to,
+        type: options.type,
+        id: options.id ?? '',
+    }
+    if (requesterJid) attrs.participant = requesterJid
+    return {
+        tag: WA_MESSAGE_TAGS.MESSAGE,
+        attrs,
+        content: [
+            {
+                tag: WA_MESSAGE_TAGS.ENC,
+                attrs: buildEncAttrs(encType, options.mediatype, retryCount, options.decryptFail),
+                content: ciphertext,
+            },
+        ],
+    }
+}
+
+/**
+ * Builds a retry stanza for a group message that could not be delivered.
+ *
  * @param options The message options.
  * @param encType The ciphertext kind.
  * @param ciphertext The ciphertext.
@@ -197,21 +261,5 @@ export function buildGroupRetryMessageNode(
     retryCount: number,
     requesterJid: string,
 ): BinaryNode {
-    const attrs: Record<string, string> = {
-        to: options.to,
-        type: options.type,
-        id: options.id ?? '',
-        participant: requesterJid,
-    }
-    return {
-        tag: WA_MESSAGE_TAGS.MESSAGE,
-        attrs,
-        content: [
-            {
-                tag: WA_MESSAGE_TAGS.ENC,
-                attrs: buildEncAttrs(encType, options.mediatype, retryCount, options.decryptFail),
-                content: ciphertext,
-            },
-        ],
-    }
+    return buildRetryMessageNode(options, encType, ciphertext, retryCount, requesterJid)
 }

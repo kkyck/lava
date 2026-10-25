@@ -185,3 +185,73 @@ function groupJidFromAttrs(id: string): string {
     if (id.includes('@')) return id
     return `${id}@g.us`
 }
+
+/** The default lifetime of a cached group membership, in milliseconds. */
+export const GROUP_METADATA_CACHE_TTL_MS = 5 * 60 * 1000
+
+/** One cached group membership. */
+interface GroupMetadataCacheEntry {
+    /** The metadata of the group. */
+    metadata: GroupMetadata
+    /** When the entry was written, in milliseconds since the epoch. */
+    updatedAtMs: number
+}
+
+/**
+ * The cached membership of the groups.
+ *
+ * The group server is picky about the number of metadata queries it
+ * accepts: a client that asks for the member list of the same group over
+ * and over is eventually refused with a `403 forbidden`. The membership
+ * changes rarely, so the answer is kept for a while.
+ */
+export class GroupMetadataCache {
+    private readonly entries = new Map<string, GroupMetadataCacheEntry>()
+    private readonly ttlMs: number
+
+    /**
+     * @param options The store options.
+     */
+    constructor(options: { ttlMs?: number } = {}) {
+        this.ttlMs = options.ttlMs ?? GROUP_METADATA_CACHE_TTL_MS
+    }
+
+    /**
+     * Returns the cached metadata of a group.
+     *
+     * @param groupJid The group.
+     */
+    get(groupJid: string): GroupMetadata | undefined {
+        const entry = this.entries.get(groupJid)
+        if (!entry) return undefined
+        if (Date.now() - entry.updatedAtMs > this.ttlMs) {
+            this.entries.delete(groupJid)
+            return undefined
+        }
+        return entry.metadata
+    }
+
+    /**
+     * Stores the metadata of a group.
+     *
+     * @param groupJid The group.
+     * @param metadata The metadata.
+     */
+    set(groupJid: string, metadata: GroupMetadata): void {
+        this.entries.set(groupJid, { metadata, updatedAtMs: Date.now() })
+    }
+
+    /**
+     * Drops the cached metadata of a group.
+     *
+     * @param groupJid The group.
+     */
+    invalidate(groupJid: string): void {
+        this.entries.delete(groupJid)
+    }
+
+    /** Drops every cached membership. */
+    clear(): void {
+        this.entries.clear()
+    }
+}

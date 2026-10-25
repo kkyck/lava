@@ -43,6 +43,8 @@ export const WA_NODE_TAGS = Object.freeze({
     TYPE: 'type',
     IDENTITY: 'identity',
     SKEY: 'skey',
+    RETRY: 'retry',
+    KEYS: 'keys',
     ID: 'id',
     REF: 'ref',
     VALUE: 'value',

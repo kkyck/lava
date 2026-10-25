@@ -17,11 +17,13 @@ import {
     extractSenderKeyDistribution,
     hasMessageContent,
     prepareOutboundPlaintext,
+    prepareSenderKeyDistributionPayload,
     resolveContentType,
     resolveInboundMessageKey,
     stripInboundPadding,
     summarizeMessageBody,
 } from '../src/message/codec.js'
+import { decode } from '../src/proto/codec.js'
 import {
     createUseCaseSecret,
     ensureMessageSecret,
@@ -451,6 +453,47 @@ describe('sender key distribution', () => {
             }),
             null,
         )
+    })
+})
+
+describe('sender key distribution payload', () => {
+    it('wraps the distribution into a message body', () => {
+        const distribution = new Uint8Array([1, 2, 3, 4, 5])
+        const payload = prepareSenderKeyDistributionPayload('group@g.us', distribution)
+
+        // The payload is padded, so the padding has to come off first.
+        const body = decodeMessageBody(stripInboundPadding(payload))
+        const extracted = extractSenderKeyDistribution(body)
+        assert.ok(extracted)
+        assert.equal(extracted.groupId, 'group@g.us')
+        assert.deepEqual(extracted.payload, distribution)
+    })
+
+    it('produces a payload the receiver can decode as a message', () => {
+        const distribution = new Uint8Array(78).fill(0x5a)
+        const payload = prepareSenderKeyDistributionPayload('group@g.us', distribution)
+
+        // The bare distribution bytes are not a valid message; the wrapper
+        // is what makes them readable.
+        assert.throws(() => decodeMessageBody(distribution))
+
+        const decoded = decode('Message', stripInboundPadding(payload))
+        const wrapper = decoded.senderKeyDistributionMessage as
+            | Record<string, unknown>
+            | undefined
+        assert.ok(wrapper)
+        assert.equal(wrapper.groupId, 'group@g.us')
+        const axolotl = wrapper.axolotlSenderKeyDistributionMessage as Uint8Array
+        assert.equal(axolotl.length, 78)
+    })
+
+    it('pads the payload', () => {
+        const payload = prepareSenderKeyDistributionPayload(
+            'group@g.us',
+            new Uint8Array([1, 2, 3]),
+        )
+        const padLength = payload[payload.length - 1]!
+        assert.ok(padLength >= 1 && padLength <= 16, `bad pad length ${padLength}`)
     })
 })
 

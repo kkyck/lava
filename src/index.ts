@@ -165,12 +165,21 @@ export { computePhashV2 } from './protocol/phash.js'
 
 export {
     findGroupNode,
+    GroupMetadataCache,
+    GROUP_METADATA_CACHE_TTL_MS,
     parseGroupMetadata,
     parseGroupParticipants,
     type GroupMetadata,
     type GroupParticipant,
     type GroupParticipantRole,
 } from './protocol/group.js'
+
+export {
+    parseRetryReceipt,
+    RETRY_REGISTRATION_ID_LENGTH,
+    type RetryRequest,
+    type RetryRequestType,
+} from './protocol/retry.js'
 
 export {
     buildAudioContent,
@@ -287,6 +296,7 @@ export {
     encodeMessageBody,
     extractSenderKeyDistribution,
     prepareOutboundPlaintext,
+    prepareSenderKeyDistributionPayload,
     resolveContentType,
     resolveInboundMessageKey,
     stripInboundPadding,
@@ -295,6 +305,14 @@ export {
     type InboundMessageKey,
     type SenderKeyDistribution,
 } from './message/codec.js'
+
+export {
+    OutboundMessageCache,
+    OUTBOUND_MESSAGE_MAX_ENTRIES,
+    OUTBOUND_MESSAGE_TTL_MS,
+    type OutboundMessage,
+    type OutboundMessageCacheOptions,
+} from './message/outbound-cache.js'
 
 // ── Signal ──────────────────────────────────────────────────────────────────
 
@@ -499,7 +517,9 @@ export {
 
 export {
     buildDirectMessageFanoutNode,
+    buildGroupRetryMessageNode,
     buildGroupSenderKeyMessageNode,
+    buildRetryMessageNode,
     type EncryptedParticipant,
 } from './transport/node/builders/message.js'
 

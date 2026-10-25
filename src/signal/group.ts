@@ -44,7 +44,7 @@ import {
     WHISPER_GROUP_INFO,
 } from './constants.js'
 import { generateSerializedKeyPair, type SerializedKeyPair } from './session.js'
-import { parseSignalAddressFromJid, signalAddressKey } from '../protocol/jid.js'
+import { parseSignalAddressFromJid, signalAddressKey, type JidParts } from '../protocol/jid.js'
 import {
     deserializeSenderKeyRecord,
     serializeSenderKeyRecord,
@@ -253,6 +253,17 @@ export class SenderKeyManager {
     private readonly receivedKeys = new Map<string, SenderKeyRecord>()
 
     /**
+     * The sender-key distribution each device received, keyed by
+     * `groupId \u0000 address`.
+     *
+     * The value is the id of the sender key the device was told about. A
+     * device that is not listed — or that is listed with a different key id
+     * — does not know the current sender key and needs the distribution
+     * again.
+     */
+    private readonly distributions = new Map<string, number>()
+
+    /**
      * @param options Optional configuration.
      */
     constructor(options: SenderKeyManagerOptions = {}) {
@@ -350,6 +361,83 @@ export class SenderKeyManager {
     /** Returns the sender key received from `sender` for `groupId`. */
     getReceivedSenderKey(groupId: string, sender: string): SenderKeyRecord | undefined {
         return this.receivedKeys.get(receiverKey(groupId, sender))
+    }
+
+    /**
+     * Filters a list of devices down to those that still need the sender key.
+     *
+     * A device only needs the distribution when it does not know the current
+     * generation of the sender key. Sending it again would be wasteful: the
+     * distribution is a pairwise payload, so every extra copy is another
+     * message to every device of the group.
+     *
+     * @param groupId The group the sender key belongs to.
+     * @param keyId The id of the sender key.
+     * @param addresses The addresses of the devices.
+     */
+    filterParticipantsNeedingDistribution(
+        groupId: string,
+        keyId: number,
+        addresses: readonly JidParts[],
+    ): JidParts[] {
+        const out: JidParts[] = []
+        for (const address of addresses) {
+            const known = this.distributions.get(distributionKey(groupId, address))
+            if (known === undefined || known !== keyId) out.push(address)
+        }
+        return out
+    }
+
+    /**
+     * Records that the sender key was delivered to a set of devices.
+     *
+     * @param groupId The group the sender key belongs to.
+     * @param keyId The id of the sender key.
+     * @param addresses The addresses of the devices.
+     */
+    markSenderKeyDistributed(
+        groupId: string,
+        keyId: number,
+        addresses: readonly JidParts[],
+    ): void {
+        if (addresses.length === 0) return
+        for (const address of addresses) {
+            this.distributions.set(distributionKey(groupId, address), keyId)
+        }
+        this.notifyChanged()
+    }
+
+    /**
+     * Forgets the recorded distributions of a group.
+     *
+     * The devices are told about the sender key again with the next message.
+     *
+     * @param groupId The group.
+     */
+    forgetDistributions(groupId: string): void {
+        const prefix = `${groupId}\u0000`
+        let changed = false
+        for (const key of [...this.distributions.keys()]) {
+            if (!key.startsWith(prefix)) continue
+            this.distributions.delete(key)
+            changed = true
+        }
+        if (changed) this.notifyChanged()
+    }
+
+    /**
+     * Forgets the recorded distribution of a single device.
+     *
+     * A device that asked for a retry did not get the sender key, so the
+     * next message has to carry the distribution again.
+     *
+     * @param groupId The group.
+     * @param address The address of the device.
+     */
+    forgetDistribution(groupId: string, address: JidParts): void {
+        const key = distributionKey(groupId, address)
+        if (!this.distributions.delete(key)) return
+        this.notifyChanged()
     }
 
     /**
@@ -607,7 +695,11 @@ export class SenderKeyManager {
         for (const [key, record] of this.receivedKeys) {
             received[key] = serializeSenderKeyRecord(record)
         }
-        return { own, received }
+        const distributions: Record<string, number> = {}
+        for (const [key, keyId] of this.distributions) {
+            distributions[key] = keyId
+        }
+        return { own, received, distributions }
     }
 
     /**
@@ -621,12 +713,16 @@ export class SenderKeyManager {
     importState(state: SerializedSenderKeyState | undefined): void {
         this.ownKeys.clear()
         this.receivedKeys.clear()
+        this.distributions.clear()
         if (!state) return
         for (const [groupId, record] of Object.entries(state.own ?? {})) {
             this.ownKeys.set(groupId, deserializeSenderKeyRecord(record))
         }
         for (const [key, record] of Object.entries(state.received ?? {})) {
             this.receivedKeys.set(key, deserializeSenderKeyRecord(record))
+        }
+        for (const [key, keyId] of Object.entries(state.distributions ?? {})) {
+            this.distributions.set(key, keyId)
         }
     }
 }
@@ -864,6 +960,16 @@ function replaceGeneration(
  */
 function receiverKey(groupId: string, sender: string): string {
     return `${groupId}\u0000${senderAddressKey(sender)}`
+}
+
+/**
+ * Builds the key under which a sender-key distribution is remembered.
+ *
+ * @param groupId The group.
+ * @param address The address of the device.
+ */
+function distributionKey(groupId: string, address: JidParts): string {
+    return `${groupId}\u0000${signalAddressKey(address)}`
 }
 
 /**

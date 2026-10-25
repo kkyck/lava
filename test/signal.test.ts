@@ -20,6 +20,7 @@ import { SignalSessionManager } from '../src/signal/manager.js'
 import { SenderKeyManager } from '../src/signal/group.js'
 import { deserializePreKeyMessage, deserializeSignalMessage } from '../src/signal/session.js'
 import { MAX_SENDER_KEY_STATES, SIGNAL_VERSION } from '../src/signal/constants.js'
+import { parseSignalAddressFromJid } from '../src/protocol/jid.js'
 import { prependVersion } from '../src/crypto/primitives.js'
 import { encode } from '../src/proto/codec.js'
 import '../src/proto/schema.js'
@@ -415,6 +416,133 @@ describe('sender keys (group chats)', () => {
         // key of the second device has to be found by its key id.
         const late = bob.manager.decryptFromGroup(GROUP, ALICE, first.ciphertext)
         assert.equal(fromUtf8(late.plaintext), 'first generation')
+    })
+})
+
+describe('sender key distribution bookkeeping', () => {
+    it('asks every device for the distribution at first', () => {
+        const alice = makePeer(ALICE)
+        const manager = alice.manager.senderKeyManager
+        const group = alice.manager.encryptForGroup(GROUP, utf8('hello'))
+
+        const addresses = [
+            parseSignalAddressFromJid('11111111111:0@s.whatsapp.net'),
+            parseSignalAddressFromJid('22222222222:1@s.whatsapp.net'),
+        ]
+        const pending = manager.filterParticipantsNeedingDistribution(
+            GROUP,
+            group.senderKeyId!,
+            addresses,
+        )
+        assert.equal(pending.length, 2)
+    })
+
+    it('does not ask a device that already knows the key', () => {
+        const alice = makePeer(ALICE)
+        const manager = alice.manager.senderKeyManager
+        const group = alice.manager.encryptForGroup(GROUP, utf8('hello'))
+
+        const address = parseSignalAddressFromJid('22222222222:1@s.whatsapp.net')
+        manager.markSenderKeyDistributed(GROUP, group.senderKeyId!, [address])
+
+        const pending = manager.filterParticipantsNeedingDistribution(
+            GROUP,
+            group.senderKeyId!,
+            [address],
+        )
+        assert.equal(pending.length, 0)
+    })
+
+    it('asks again when the sender key was replaced', () => {
+        const alice = makePeer(ALICE)
+        const manager = alice.manager.senderKeyManager
+        const group = alice.manager.encryptForGroup(GROUP, utf8('hello'))
+
+        const address = parseSignalAddressFromJid('22222222222:1@s.whatsapp.net')
+        manager.markSenderKeyDistributed(GROUP, group.senderKeyId!, [address])
+
+        manager.rotateSenderKey(GROUP)
+        const next = alice.manager.encryptForGroup(GROUP, utf8('again'))
+
+        const pending = manager.filterParticipantsNeedingDistribution(
+            GROUP,
+            next.senderKeyId!,
+            [address],
+        )
+        assert.equal(pending.length, 1)
+    })
+
+    it('keeps the bookkeeping of the groups apart', () => {
+        const alice = makePeer(ALICE)
+        const manager = alice.manager.senderKeyManager
+        const group = alice.manager.encryptForGroup(GROUP, utf8('hello'))
+
+        const address = parseSignalAddressFromJid('22222222222:1@s.whatsapp.net')
+        manager.markSenderKeyDistributed(GROUP, group.senderKeyId!, [address])
+
+        const other = manager.filterParticipantsNeedingDistribution(
+            'other@g.us',
+            group.senderKeyId!,
+            [address],
+        )
+        assert.equal(other.length, 1)
+    })
+
+    it('asks again after the distribution was forgotten', () => {
+        const alice = makePeer(ALICE)
+        const manager = alice.manager.senderKeyManager
+        const group = alice.manager.encryptForGroup(GROUP, utf8('hello'))
+
+        const address = parseSignalAddressFromJid('22222222222:1@s.whatsapp.net')
+        manager.markSenderKeyDistributed(GROUP, group.senderKeyId!, [address])
+        manager.forgetDistribution(GROUP, address)
+
+        const pending = manager.filterParticipantsNeedingDistribution(
+            GROUP,
+            group.senderKeyId!,
+            [address],
+        )
+        assert.equal(pending.length, 1)
+    })
+
+    it('forgets the whole group at once', () => {
+        const alice = makePeer(ALICE)
+        const manager = alice.manager.senderKeyManager
+        const group = alice.manager.encryptForGroup(GROUP, utf8('hello'))
+
+        const addresses = [
+            parseSignalAddressFromJid('11111111111:0@s.whatsapp.net'),
+            parseSignalAddressFromJid('22222222222:1@s.whatsapp.net'),
+        ]
+        manager.markSenderKeyDistributed(GROUP, group.senderKeyId!, addresses)
+        manager.forgetDistributions(GROUP)
+
+        const pending = manager.filterParticipantsNeedingDistribution(
+            GROUP,
+            group.senderKeyId!,
+            addresses,
+        )
+        assert.equal(pending.length, 2)
+    })
+
+    it('survives a restart', () => {
+        const alice = makePeer(ALICE)
+        const manager = alice.manager.senderKeyManager
+        const group = alice.manager.encryptForGroup(GROUP, utf8('hello'))
+
+        const address = parseSignalAddressFromJid('22222222222:1@s.whatsapp.net')
+        manager.markSenderKeyDistributed(GROUP, group.senderKeyId!, [address])
+
+        const state = manager.exportState()
+        const restored = new SenderKeyManager({ localAddress: ALICE })
+        restored.importState(state)
+
+        const pending = restored.filterParticipantsNeedingDistribution(
+            GROUP,
+            group.senderKeyId!,
+            [address],
+        )
+        assert.equal(pending.length, 0)
     })
 })
 
