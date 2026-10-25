@@ -96,6 +96,20 @@ import {
     MAX_RETAINED_PRE_KEYS,
 } from './signal/keys.js'
 import { SignalSessionManager } from './signal/manager.js'
+import {
+    MediaConnectionCache,
+    downloadMedia,
+    uploadMedia,
+    type MediaHttpHandler,
+    type MediaTransferOptions,
+    type WaMediaUpload,
+} from './media/transfer.js'
+import {
+    buildMediaContent,
+    resolveMediaPayload,
+    type MediaPayload,
+    type WaMediaType,
+} from './protocol/media.js'
 import type { BinaryNode } from './transport/binary/types.js'
 import {
     DEFAULT_ANDROID_PROFILE,
@@ -230,8 +244,51 @@ export interface WaClientOptions {
      * The official clients upload a batch of 812, which is also the default.
      */
     preKeyCount?: number
+    /**
+     * The HTTP handler used for media transfers.
+     *
+     * The default one talks to the real WhatsApp CDN; override it to route
+     * the traffic through a proxy or to serve the media from a test double.
+     */
+    mediaHttp?: MediaHttpHandler
+    /** The timeout of a media transfer, in milliseconds. */
+    mediaTimeoutMs?: number
     /** Builds the transport; overrides the built-in ones when set. */
     transportFactory?: WaTransportFactory
+}
+
+/** The options of a media message. */
+export interface WaMediaMessageOptions {
+    /** The media kind. */
+    type: WaMediaType
+    /** The MIME type of the file. */
+    mimetype: string
+    /** The caption that goes with the file. */
+    caption?: string
+    /** The JPEG thumbnail. */
+    jpegThumbnail?: Uint8Array
+    /** The PNG thumbnail (stickers). */
+    pngThumbnail?: Uint8Array
+    /** The width of the file, in pixels. */
+    width?: number
+    /** The height of the file, in pixels. */
+    height?: number
+    /** The duration of the file, in seconds. */
+    seconds?: number
+    /** The file name (documents). */
+    fileName?: string
+    /** The document title (documents). */
+    title?: string
+    /** The number of pages (documents). */
+    pageCount?: number
+    /** Whether the audio is a push-to-talk voice note. */
+    ptt?: boolean
+    /** Whether the video plays as a GIF. */
+    gifPlayback?: boolean
+    /** Whether the sticker is animated. */
+    isAnimated?: boolean
+    /** The length of the sticker's first frame. */
+    firstFrameLength?: number
 }
 
 /** An inbound message, as handed to the `message` event. */
@@ -346,6 +403,7 @@ export class WaClient extends EventEmitter {
     private readonly keyStore: SignalKeyStore
     private readonly signal: SignalSessionManager
     private readonly deviceList = new DeviceListStore()
+    private readonly mediaConn = new MediaConnectionCache()
 
     private credentials: CredentialSnapshot | null = null
     private transport: WaTransport | null = null
@@ -1414,7 +1472,10 @@ export class WaClient extends EventEmitter {
      * @param node The IQ node.
      * @param timeoutMs The response timeout.
      */
-    private async query(node: BinaryNode, timeoutMs = WA_DEFAULTS.IQ_TIMEOUT_MS): Promise<BinaryNode> {
+    private async query(
+        node: BinaryNode,
+        timeoutMs: number = WA_DEFAULTS.IQ_TIMEOUT_MS,
+    ): Promise<BinaryNode> {
         if (!this.transport) throw new Error('client: not connected')
         return this.transport.query(node, timeoutMs)
     }
@@ -1499,6 +1560,79 @@ export class WaClient extends EventEmitter {
             this.credentials = null
             this.setState('disconnected')
         },
+    }
+
+    /**
+     * The media API.
+     *
+     * Media files are uploaded to the WhatsApp CDN, encrypted with a
+     * per-file key, and referenced from the message stanza. A download does
+     * the reverse: the CDN is asked for the encrypted bytes, which are then
+     * decrypted and verified locally.
+     */
+    readonly media = {
+        /**
+         * Encrypts a media file and uploads it to the WhatsApp CDN.
+         *
+         * @param data The media bytes.
+         * @param options The media kind and its MIME type.
+         */
+        upload: async (
+            data: Uint8Array,
+            options: { type: WaMediaType; mimetype: string },
+        ): Promise<WaMediaUpload> => {
+            const conn = await this.mediaConn.get(this.mediaTransferOptions())
+            return uploadMedia({ ...this.mediaTransferOptions(), conn }, {
+                data,
+                type: options.type,
+                mimetype: options.mimetype,
+            })
+        },
+
+        /**
+         * Downloads and decrypts the media of a message.
+         *
+         * @param source The inbound message, the raw message body, or a
+         *               media payload that was extracted earlier.
+         */
+        download: async (
+            source: WaInboundMessage | MessageContent | MediaPayload,
+        ): Promise<Uint8Array> => {
+            const payload = this.resolveMediaPayload(source)
+            if (!payload) throw new Error('client: the message carries no downloadable media')
+            return downloadMedia(this.mediaTransferOptions(), payload)
+        },
+    }
+
+    /**
+     * Builds the options of a media transfer.
+     */
+    private mediaTransferOptions(): MediaTransferOptions {
+        return {
+            query: (node, timeoutMs) => this.query(node, timeoutMs),
+            ...(this.options.mediaHttp ? { http: this.options.mediaHttp } : {}),
+            ...(this.options.mediaTimeoutMs !== undefined
+                ? { timeoutMs: this.options.mediaTimeoutMs }
+                : {}),
+        }
+    }
+
+    /**
+     * Extracts the media payload of a message, an inbound message, or an
+     * already extracted payload.
+     *
+     * @param source The source.
+     */
+    private resolveMediaPayload(
+        source: WaInboundMessage | MessageContent | MediaPayload,
+    ): MediaPayload | undefined {
+        if (source && typeof source === 'object' && 'message' in source) {
+            return resolveMediaPayload((source as WaInboundMessage).message)
+        }
+        if (source && typeof source === 'object' && 'mediaType' in source) {
+            return source as MediaPayload
+        }
+        return resolveMediaPayload(source as MessageContent)
     }
 
     /** The messaging API. */
@@ -1588,6 +1722,62 @@ export class WaClient extends EventEmitter {
             contact: { displayName: string; vcard: string },
         ): Promise<string> => {
             return this.sendBody(to, buildContactContent(contact))
+        },
+
+        /**
+         * Uploads a media file and sends it.
+         *
+         * The file is encrypted with a fresh media key and uploaded to the
+         * WhatsApp CDN first; the message stanza then only carries the
+         * metadata (the key, the hashes and the CDN path).
+         *
+         * @param to The recipient.
+         * @param data The media bytes.
+         * @param options The media kind and its metadata.
+         */
+        sendMedia: async (
+            to: string,
+            data: Uint8Array,
+            options: WaMediaMessageOptions,
+        ): Promise<string> => {
+            const upload = await this.media.upload(data, {
+                type: options.type,
+                mimetype: options.mimetype,
+            })
+            const body = buildMediaContent(options.type, {
+                url: upload.url,
+                directPath: upload.directPath,
+                mediaKey: upload.mediaKey,
+                fileSha256: upload.fileSha256,
+                fileEncSha256: upload.fileEncSha256,
+                fileLength: upload.fileLength,
+                mediaKeyTimestamp: upload.mediaKeyTimestamp,
+                mimetype: options.mimetype,
+                ...(options.caption !== undefined ? { caption: options.caption } : {}),
+                ...(options.jpegThumbnail !== undefined
+                    ? { jpegThumbnail: options.jpegThumbnail }
+                    : {}),
+                ...(options.pngThumbnail !== undefined
+                    ? { pngThumbnail: options.pngThumbnail }
+                    : {}),
+                ...(options.width !== undefined ? { width: options.width } : {}),
+                ...(options.height !== undefined ? { height: options.height } : {}),
+                ...(options.seconds !== undefined ? { seconds: options.seconds } : {}),
+                ...(options.fileName !== undefined ? { fileName: options.fileName } : {}),
+                ...(options.title !== undefined ? { title: options.title } : {}),
+                ...(options.pageCount !== undefined ? { pageCount: options.pageCount } : {}),
+                ...(options.ptt !== undefined ? { ptt: options.ptt } : {}),
+                ...(options.gifPlayback !== undefined
+                    ? { gifPlayback: options.gifPlayback }
+                    : {}),
+                ...(options.isAnimated !== undefined
+                    ? { isAnimated: options.isAnimated }
+                    : {}),
+                ...(options.firstFrameLength !== undefined
+                    ? { firstFrameLength: options.firstFrameLength }
+                    : {}),
+            })
+            return this.sendBody(to, body)
         },
 
         /**

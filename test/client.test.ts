@@ -26,6 +26,7 @@ import {
     generateSignedPreKey,
 } from '../src/signal/keys.js'
 import { SIGNAL_UPLOAD_PREKEYS_COUNT } from '../src/signal/api.js'
+import type { MediaHttpHandler, MediaHttpRequest } from '../src/media/transfer.js'
 import {
     decodeMessageBody,
     prepareOutboundPlaintext,
@@ -142,6 +143,7 @@ class MockTransport implements WaTransport {
     async query(node: BinaryNode): Promise<BinaryNode> {
         const xmlns = node.attrs.xmlns
         if (xmlns === 'usync') return this.answerDeviceList(node)
+        if (xmlns === 'w:m') return this.answerMediaConn(node)
         if (xmlns === 'encrypt') {
             const keyFetch = findNodeChild(node, 'key_fetch')
             if (keyFetch) return this.answerKeyFetch(node)
@@ -160,6 +162,29 @@ class MockTransport implements WaTransport {
             return { tag: 'iq', attrs: { id: node.attrs.id ?? '', type: 'result' } }
         }
         return { tag: 'iq', attrs: { id: node.attrs.id ?? '', type: 'result' } }
+    }
+
+    /**
+     * Answers the media connection IQ with an upload token and a CDN host.
+     */
+    private answerMediaConn(node: BinaryNode): BinaryNode {
+        return {
+            tag: 'iq',
+            attrs: { id: node.attrs.id ?? '', type: 'result' },
+            content: [
+                {
+                    tag: 'media_conn',
+                    attrs: { auth: 'test-token', ttl: '3600' },
+                    content: [
+                        { tag: 'host', attrs: { hostname: 'mmg.whatsapp.net' } },
+                        {
+                            tag: 'host',
+                            attrs: { hostname: 'mmg-fallback.whatsapp.net', type: 'fallback' },
+                        },
+                    ],
+                },
+            ],
+        }
     }
 
     /**
@@ -431,6 +456,7 @@ function intToBytes(length: number, value: number): Uint8Array {
 /** Builds a client wired to a mock transport. */
 function makeClient(
     mode: 'mobile' | 'web' = 'mobile',
+    extra: Partial<ConstructorParameters<typeof WaClient>[0]> = {},
 ): { client: WaClient; transport: MockTransport } {
     const transport = new MockTransport()
     const client = new WaClient({
@@ -441,6 +467,7 @@ function makeClient(
             transport.payload = context.noise.payload
             return transport
         },
+        ...extra,
     })
     transport.client = client
     return { client, transport }
@@ -920,6 +947,128 @@ describe('client messaging', () => {
         // A video call carries a `<video/>` marker.
         const video = findNodeChild(offer, 'video')
         assert.ok(video)
+    })
+})
+
+describe('client media', () => {
+    /** The CDN requests the client made. */
+    const requests: MediaHttpRequest[] = []
+
+    /** The encrypted payloads the CDN received. */
+    const stored = new Map<string, Uint8Array>()
+
+    /** The HTTP handler that pretends to be the WhatsApp CDN. */
+    const cdn: MediaHttpHandler = async (request) => {
+        requests.push(request)
+        if (request.method === 'POST') {
+            const url = new URL(request.url)
+            const key = `${url.host}${url.pathname}`
+            stored.set(key, request.body ?? new Uint8Array(0))
+            return {
+                status: 200,
+                headers: {},
+                body: new TextEncoder().encode(
+                    JSON.stringify({
+                        url: `https://mmg.whatsapp.net${url.pathname}`,
+                        direct_path: url.pathname,
+                    }),
+                ),
+            }
+        }
+        const url = new URL(request.url)
+        const body = stored.get(`${url.host}${url.pathname}`)
+        if (!body) return { status: 404, headers: {}, body: new Uint8Array(0) }
+        return { status: 200, headers: {}, body }
+    }
+
+    /** Builds a paired client whose media goes to the fake CDN. */
+    async function mediaClient(): Promise<{ client: WaClient; transport: MockTransport }> {
+        const pair = makeClient('mobile', { mediaHttp: cdn })
+        await pair.client.connect()
+        pair.transport.push({
+            tag: 'success',
+            attrs: {},
+            content: [{ tag: 'props', attrs: { jid: ME_JID } }],
+        })
+        await waitFor(() => pair.client.getState() === 'connected')
+        return pair
+    }
+
+    it('uploads a file to the CDN and sends the media message', async () => {
+        requests.length = 0
+        stored.clear()
+        const { client, transport } = await mediaClient()
+
+        const picture = new TextEncoder().encode('the picture bytes')
+        const id = await client.message.sendMedia(PEER_JID, picture, {
+            type: 'image',
+            mimetype: 'image/jpeg',
+            caption: 'a picture',
+            width: 640,
+            height: 480,
+        })
+        assert.ok(id.length > 0)
+
+        // The file went to the CDN first.
+        assert.equal(requests.length, 1)
+        assert.equal(requests[0]!.method, 'POST')
+        assert.ok(requests[0]!.url.includes('/mms/image/'))
+
+        // The stanza carries the media message, not the raw bytes.
+        const stanza = transport.sent.find((node) => node.tag === 'message')
+        assert.ok(stanza)
+        assert.equal(stanza.attrs.type, 'media')
+
+        const enc = findNodeChild(
+            getNodeChildrenByTag(findNodeChild(stanza, 'participants')!, 'to')[0]!,
+            'enc',
+        )
+        assert.ok(enc)
+        // The media type travels in the `mediatype` attribute of the `<enc>`.
+        assert.equal(enc.attrs.mediatype, 'image')
+
+        const decrypted = transport.peer.manager.decryptFromDevice(
+            ME_DEVICE_JID,
+            enc.content as Uint8Array,
+            enc.attrs.type === 'pkmsg' ? 'pkmsg' : 'msg',
+        )
+        const body = decodeMessageBody(stripInboundPadding(decrypted.plaintext))
+        const image = body.imageMessage as Record<string, unknown>
+        assert.equal(image.caption, 'a picture')
+        assert.equal(image.width, 640)
+        assert.equal(image.height, 480)
+        assert.equal(image.fileLength, picture.length)
+        assert.ok(image.mediaKey instanceof Uint8Array)
+        assert.equal((image.mediaKey as Uint8Array).length, 32)
+    })
+
+    it('downloads and decrypts the media of a message', async () => {
+        requests.length = 0
+        stored.clear()
+        const { client } = await mediaClient()
+
+        const picture = new TextEncoder().encode('downloadable bytes')
+        const upload = await client.media.upload(picture, {
+            type: 'image',
+            mimetype: 'image/jpeg',
+        })
+
+        const downloaded = await client.media.download({
+            mediaType: 'image',
+            directPath: upload.directPath,
+            mediaKey: upload.mediaKey,
+            fileSha256: upload.fileSha256,
+            fileEncSha256: upload.fileEncSha256,
+        })
+        assert.deepEqual(downloaded, picture)
+    })
+
+    it('refuses to download a message that carries no media', async () => {
+        const { client } = await mediaClient()
+        await assert.rejects(
+            () => client.media.download({ conversation: 'just text' }),
+            /no downloadable media/,
+        )
     })
 })
 

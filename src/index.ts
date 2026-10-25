@@ -26,6 +26,7 @@ export {
     type WaClientOptions,
     type WaConnectionState,
     type WaInboundMessage,
+    type WaMediaMessageOptions,
     type WaMessageAck,
     type WaReceipt,
     type WaSessionInfo,
@@ -136,6 +137,54 @@ export {
 } from './protocol/message.js'
 
 export { computePhashV2 } from './protocol/phash.js'
+
+export {
+    buildAudioContent,
+    buildDocumentContent,
+    buildImageContent,
+    buildMediaContent,
+    buildStickerContent,
+    buildVideoContent,
+    resolveMediaPayload,
+    type MediaMessageOptions,
+    type MediaPayload,
+    type WaMediaType,
+} from './protocol/media.js'
+
+// ── Media ────────────────────────────────────────────────────────────────────
+
+export {
+    MEDIA_HKDF_INFO,
+    MEDIA_KEY_LENGTH,
+    decryptMedia,
+    deriveMediaKeys,
+    encryptMedia,
+    encryptedMediaLength,
+    getMediaHkdfInfo,
+    type DecryptedMedia,
+    type EncryptedMedia,
+    type MediaKeys,
+} from './media/crypto.js'
+
+export {
+    DEFAULT_MEDIA_HOSTS,
+    MEDIA_TIMEOUT_MS,
+    MEDIA_UPLOAD_PATHS,
+    MediaConnectionCache,
+    buildMediaConnIq,
+    buildMediaUploadUrl,
+    defaultMediaHttpHandler,
+    downloadMedia,
+    parseMediaConnResponse,
+    selectMediaHost,
+    uploadMedia,
+    type MediaHttpHandler,
+    type MediaHttpRequest,
+    type MediaHttpResponse,
+    type MediaTransferOptions,
+    type WaMediaConn,
+    type WaMediaUpload,
+} from './media/transfer.js'
 
 // ── Messages ────────────────────────────────────────────────────────────────
 
