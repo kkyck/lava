@@ -21,6 +21,7 @@ const WANTED = {
     WebSubPlatform: 'ClientPayload_WebInfo_WebSubPlatform',
     AccountType: 'ClientPayload_AccountType',
     TrafficAnonymization: 'ClientPayload_TrafficAnonymization',
+    SyncdOperation: 'SyncdMutation_SyncdOperation',
 }
 
 /** Finds an enum by its trailing name, ignoring the owner prefix. */

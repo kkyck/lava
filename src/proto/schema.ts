@@ -702,6 +702,53 @@ defineMessage('MediaRetryNotification', [
     { number: 3, name: 'result', type: 'int32' },
     { number: 4, name: 'messageSecret', type: 'bytes' },
 ])
+defineMessage('SyncdMutation', [
+    { number: 1, name: 'operation', type: 'int32' },
+    { number: 2, name: 'record', type: 'message', message: 'SyncdRecord' },
+])
+defineMessage('SyncdMutations', [
+    { number: 1, name: 'mutations', type: 'message', message: 'SyncdMutation', repeated: true },
+])
+defineMessage('SyncdRecord', [
+    { number: 1, name: 'index', type: 'message', message: 'SyncdIndex' },
+    { number: 2, name: 'value', type: 'message', message: 'SyncdValue' },
+    { number: 3, name: 'keyId', type: 'message', message: 'KeyId' },
+])
+defineMessage('SyncdVersion', [
+    { number: 1, name: 'version', type: 'uint64' },
+])
+defineMessage('SyncdSnapshot', [
+    { number: 1, name: 'version', type: 'message', message: 'SyncdVersion' },
+    { number: 2, name: 'records', type: 'message', message: 'SyncdRecord', repeated: true },
+    { number: 3, name: 'mac', type: 'bytes' },
+    { number: 4, name: 'keyId', type: 'message', message: 'KeyId' },
+])
+defineMessage('SyncdPatch', [
+    { number: 1, name: 'version', type: 'message', message: 'SyncdVersion' },
+    { number: 2, name: 'mutations', type: 'message', message: 'SyncdMutation', repeated: true },
+    { number: 3, name: 'externalMutations', type: 'message', message: 'ExternalBlobReference' },
+    { number: 4, name: 'snapshotMac', type: 'bytes' },
+    { number: 5, name: 'patchMac', type: 'bytes' },
+    { number: 6, name: 'keyId', type: 'message', message: 'KeyId' },
+    { number: 7, name: 'exitCode', type: 'message', message: 'ExitCode' },
+    { number: 8, name: 'deviceIndex', type: 'uint32' },
+    { number: 9, name: 'clientDebugData', type: 'bytes' },
+])
+defineMessage('ExternalBlobReference', [
+    { number: 1, name: 'mediaKey', type: 'bytes' },
+    { number: 2, name: 'directPath', type: 'string' },
+    { number: 3, name: 'handle', type: 'string' },
+    { number: 4, name: 'fileSizeBytes', type: 'uint64' },
+    { number: 5, name: 'fileSha256', type: 'bytes' },
+    { number: 6, name: 'fileEncSha256', type: 'bytes' },
+])
+defineMessage('KeyId', [
+    { number: 1, name: 'id', type: 'bytes' },
+])
+defineMessage('ExitCode', [
+    { number: 1, name: 'code', type: 'uint64' },
+    { number: 2, name: 'text', type: 'string' },
+])
 defineMessage('GroupParticipant', [
     { number: 1, name: 'userJid', type: 'string' },
     { number: 2, name: 'rank', type: 'int32' },
@@ -740,6 +787,12 @@ defineMessage('ADVSignedKeyIndexList', [
 defineMessage('MemberLabel', [
     { number: 1, name: 'label', type: 'string' },
     { number: 2, name: 'labelTimestamp', type: 'int64' },
+])
+defineMessage('SyncdIndex', [
+    { number: 1, name: 'blob', type: 'bytes' },
+])
+defineMessage('SyncdValue', [
+    { number: 1, name: 'blob', type: 'bytes' },
 ])
 defineMessage('SyncActionValue', [
     { number: 1, name: 'timestamp', type: 'int64' },
@@ -2790,12 +2843,6 @@ defineMessage('CoexStateSync_Mutation', [
     { number: 2, name: 'value', type: 'message', message: 'SyncdValue' },
     { number: 3, name: 'dirtyVersion', type: 'uint64' },
     { number: 4, name: 'operation', type: 'int32' },
-])
-defineMessage('SyncdIndex', [
-    { number: 1, name: 'blob', type: 'bytes' },
-])
-defineMessage('SyncdValue', [
-    { number: 1, name: 'blob', type: 'bytes' },
 ])
 defineMessage('HatchMetadataSync', [
     { number: 1, name: 'data', type: 'bytes' },

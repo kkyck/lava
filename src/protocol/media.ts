@@ -19,6 +19,16 @@ export type WaMediaType =
     | 'sticker'
     | 'gif'
     | 'ptt'
+    | 'md-app-state'
+    | 'md-msg-hist'
+
+/**
+ * The media kinds that end up in a chat message.
+ *
+ * The app-state and history blobs live on the CDN too, but they are never
+ * referenced from a message stanza, so they cannot be sent.
+ */
+export type WaSendableMediaType = Exclude<WaMediaType, 'md-app-state' | 'md-msg-hist'>
 
 /** The metadata of an uploaded media file. */
 export interface MediaMessageOptions {
@@ -194,7 +204,7 @@ export function buildMediaContent(
 /** The media payload of a message. */
 export interface MediaPayload {
     /** The media kind. */
-    mediaType: 'image' | 'video' | 'gif' | 'audio' | 'ptt' | 'document' | 'sticker'
+    mediaType: WaMediaType
     /** The path the CDN serves the file under. */
     directPath: string
     /** The media key the file was encrypted with. */

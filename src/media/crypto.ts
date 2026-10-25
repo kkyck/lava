@@ -59,6 +59,8 @@ export const MEDIA_HKDF_INFO: Readonly<Record<string, Uint8Array>> = Object.free
     gif: utf8('WhatsApp Video Keys'),
     audio: utf8('WhatsApp Audio Keys'),
     ptt: utf8('WhatsApp Audio Keys'),
+    'md-app-state': utf8('WhatsApp App State Keys'),
+    'md-msg-hist': utf8('WhatsApp History Keys'),
     'sticker-pack': utf8('WhatsApp Sticker Pack Keys'),
     'thumbnail-sticker-pack': utf8('WhatsApp Sticker Pack Thumbnail Keys'),
     'thumbnail-link': utf8('WhatsApp Link Thumbnail Keys'),

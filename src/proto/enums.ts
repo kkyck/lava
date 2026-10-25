@@ -136,3 +136,9 @@ export const ClientPayload_TrafficAnonymization = Object.freeze({
     OFF: 0,
     STANDARD: 1,
 } as const)
+
+/** `SyncdOperation` enumeration. */
+export const SyncdMutation_SyncdOperation = Object.freeze({
+    SET: 0,
+    REMOVE: 1,
+} as const)
