@@ -44,12 +44,26 @@ import {
 } from './appstate/sync.js'
 import { AppStateStore, type AppStateStoreSnapshot } from './appstate/store.js'
 import {
+    concat,
     toHex,
     generateX25519KeyPair,
     toRawPublicKey,
     toSerializedPublicKey,
 } from './crypto/primitives.js'
 import { randomBytesOf } from './crypto/primitives.js'
+import {
+    ADVEncryptionType,
+    ADV_PREFIX_HOSTED_ACCOUNT_SIGNATURE,
+    buildAdvSignedIdentityResponse,
+    computeAdvIdentityHmac,
+    generateDeviceSignature,
+    parseAdvSignedIdentity,
+    parseAdvSignedIdentityHmac,
+    readAdvDeviceType,
+    readAdvKeyIndex,
+    timingSafeEqual,
+    verifyDeviceIdentityAccountSignature,
+} from './signal/attestation.js'
 import { hostOsName } from './util/host.js'
 import { QrFlow } from './qr/flow.js'
 import { createSilentLogger, type WaLogger } from './logger.js'
@@ -176,6 +190,7 @@ import {
     buildCompanionFinishRequestNode,
     buildCompanionHelloRequestNode,
     buildGetCountryCodeRequestNode,
+    buildPairDeviceSignResultNode,
     WA_COMPANION_PLATFORM_ID,
     WA_COMPANION_PLATFORM_DISPLAY,
     WA_SIGNALING,
@@ -1786,6 +1801,26 @@ export class LavaClient extends EventEmitter {
         }
         const meJid = deviceNode.attrs.jid
         const meLid = deviceNode.attrs.lid
+
+        /**
+         * The server proves that the account authorised this device with a
+         * signed identity, sealed with the secret both sides derived during
+         * the pairing handshake. The client verifies the seal, checks the
+         * account signature and answers with its own signature — the server
+         * expects that answer and closes the socket without it.
+         */
+        const identityNode = findNodeChild(pairSuccess, WA_NODE_TAGS.DEVICE_IDENTITY)
+        if (identityNode) {
+            const signedIdentity = await this.answerPairSuccess(identityNode)
+            this.send(
+                buildPairDeviceSignResultNode(
+                    signedIdentity.content,
+                    signedIdentity.keyIndex,
+                    iqNode.attrs.id,
+                ),
+            )
+        }
+
         if (meJid) {
             // The sender keys name their owner.
             this.signal.senderKeyManager.setLocalAddresses(meJid, meLid)
@@ -1799,6 +1834,76 @@ export class LavaClient extends EventEmitter {
         this.setState('connected')
         this.emit(LavaClient.AUTH_PAIRED, { meJid, meLid })
         this.background(this.afterConnect())
+    }
+
+    /**
+     * Verifies the signed device identity of a `<pair-success>` stanza and
+     * produces the answer the server expects.
+     *
+     * The identity is sealed with the ADV secret the pairing handshake
+     * derived, and it carries the account's signature over the device
+     * details. The client proves that it holds the identity private key the
+     * server registered for it.
+     *
+     * @param identityNode The `<device-identity>` node.
+     * @returns The signed device identity and the key index it names.
+     */
+    private async answerPairSuccess(identityNode: BinaryNode): Promise<{
+        content: Uint8Array
+        keyIndex: number
+    }> {
+        const credentials = this.credentials
+        if (!credentials) throw new Error('pairing: no credentials')
+        const registration = this.keyStore.getRegistrationInfo()
+        if (!registration) throw new Error('pairing: no Signal identity')
+
+        const sealed = parseAdvSignedIdentityHmac(
+            decodeNodeContentBytes(identityNode.content, 'pair-success.device-identity'),
+        )
+        const isHosted = sealed.accountType === ADVEncryptionType.HOSTED
+        /**
+         * The seal proves that the identity belongs to the pairing that
+         * produced the ADV secret.
+         */
+        const expectedHmac = computeAdvIdentityHmac(
+            credentials.advSecretKey ? fromBase64(credentials.advSecretKey) : new Uint8Array(32),
+            isHosted
+                ? concat(ADV_PREFIX_HOSTED_ACCOUNT_SIGNATURE, sealed.details)
+                : sealed.details,
+        )
+        if (!timingSafeEqual(expectedHmac, sealed.hmac)) {
+            throw new Error('pairing: the signed device identity does not belong to this device')
+        }
+
+        const signed = parseAdvSignedIdentity(sealed.details)
+        const deviceType = readAdvDeviceType(signed.details)
+        /**
+         * The account signature is over the device details and the identity
+         * key of this device — in its raw form.
+         */
+        const identityPublicKey = toRawPublicKey(registration.identityKeyPair.pubKey)
+        if (
+            !verifyDeviceIdentityAccountSignature(
+                signed.details,
+                signed.accountSignature,
+                identityPublicKey,
+                signed.accountSignatureKey,
+                deviceType === ADVEncryptionType.HOSTED,
+            )
+        ) {
+            throw new Error('pairing: the account signature of the device identity is invalid')
+        }
+
+        const deviceSignature = generateDeviceSignature(
+            signed.details,
+            registration.identityKeyPair,
+            signed.accountSignatureKey,
+            deviceType === ADVEncryptionType.HOSTED,
+        )
+        return {
+            content: buildAdvSignedIdentityResponse(signed, deviceSignature),
+            keyIndex: readAdvKeyIndex(signed.details),
+        }
     }
 
     /**

@@ -14,27 +14,27 @@
  *    private key the server registered for it.
  */
 
-import { concat, hmacSha256, equalBytes } from '../crypto/primitives.js'
+import { concat, hmacSha256, equalBytes, toRawPublicKey } from '../crypto/primitives.js'
 import { xeddsaSign, xeddsaVerify } from '../crypto/curve25519.js'
 import { decode, encode } from '../proto/codec.js'
 
 /** The domain separator of the account signature. */
-export const ADV_PREFIX_ACCOUNT_SIGNATURE = new Uint8Array([0x02, 0x00, 0x01])
+export const ADV_PREFIX_ACCOUNT_SIGNATURE = new Uint8Array([6, 0])
 
 /** The domain separator of the hosted account signature. */
-export const ADV_PREFIX_HOSTED_ACCOUNT_SIGNATURE = new Uint8Array([0x02, 0x00, 0x02])
+export const ADV_PREFIX_HOSTED_ACCOUNT_SIGNATURE = new Uint8Array([6, 5])
 
 /** The domain separator of the device signature. */
-export const ADV_PREFIX_DEVICE_SIGNATURE = new Uint8Array([0x02, 0x00, 0x03])
+export const ADV_PREFIX_DEVICE_SIGNATURE = new Uint8Array([6, 1])
 
 /** The domain separator of the hosted device signature. */
-export const ADV_PREFIX_HOSTED_DEVICE_SIGNATURE = new Uint8Array([0x02, 0x00, 0x04])
+export const ADV_PREFIX_HOSTED_DEVICE_SIGNATURE = new Uint8Array([6, 6])
 
 /** The domain separator of the hosted account key index. */
-export const ADV_PREFIX_HOSTED_ACCOUNT_KEY_INDEX = new Uint8Array([0x02, 0x00, 0x05])
+export const ADV_PREFIX_HOSTED_ACCOUNT_KEY_INDEX = new Uint8Array([6, 7])
 
 /** The domain separator of the account key index. */
-export const ADV_PREFIX_ACCOUNT_KEY_INDEX = new Uint8Array([0x02, 0x00, 0x06])
+export const ADV_PREFIX_ACCOUNT_KEY_INDEX = new Uint8Array([6, 2])
 
 /** The ADV encryption types. */
 export const ADVEncryptionType = Object.freeze({
@@ -141,8 +141,12 @@ export function verifyDeviceIdentityAccountSignature(
     hosted = false,
 ): boolean {
     const prefix = hosted ? ADV_PREFIX_HOSTED_ACCOUNT_SIGNATURE : ADV_PREFIX_ACCOUNT_SIGNATURE
-    const message = concat(prefix, details, identityPublicKey)
-    return xeddsaVerify(stripKeyPrefix(accountSignatureKey), message, accountSignature)
+    /**
+     * Both keys go into the message in their raw form — the account
+     * signature is over the identity key the other side holds.
+     */
+    const message = concat(prefix, details, toRawPublicKey(identityPublicKey))
+    return xeddsaVerify(toRawPublicKey(accountSignatureKey), message, accountSignature)
 }
 
 /**
@@ -160,23 +164,37 @@ export function generateDeviceSignature(
     hosted = false,
 ): Uint8Array {
     const prefix = hosted ? ADV_PREFIX_HOSTED_DEVICE_SIGNATURE : ADV_PREFIX_DEVICE_SIGNATURE
-    const message = concat(prefix, details, identityKeyPair.pubKey, accountSignatureKey)
+    /**
+     * The identity key goes into the message in its raw form — the account
+     * signature key is the one the other side holds.
+     */
+    const message = concat(
+        prefix,
+        details,
+        toRawPublicKey(identityKeyPair.pubKey),
+        toRawPublicKey(accountSignatureKey),
+    )
     return xeddsaSign(identityKeyPair.privKey, message)
 }
 
 /**
  * Builds the `ADVSignedDeviceIdentity` the companion sends back.
  *
+ * The signature key of the account is not repeated in the answer — the
+ * server already knows it, and the official client leaves it out.
+ *
  * @param signed The parsed signed identity.
  * @param deviceSignature The companion's device signature.
+ * @param includeSignatureKey Whether to repeat the account signature key.
  */
 export function buildAdvSignedIdentityResponse(
     signed: ParsedAdvSignedIdentity,
     deviceSignature: Uint8Array,
+    includeSignatureKey = false,
 ): Uint8Array {
     return encode('ADVSignedDeviceIdentity', {
         details: signed.details,
-        accountSignatureKey: signed.accountSignatureKey,
+        accountSignatureKey: includeSignatureKey ? signed.accountSignatureKey : new Uint8Array(0),
         accountSignature: signed.accountSignature,
         deviceSignature,
     })
@@ -213,15 +231,6 @@ export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
     let diff = 0
     for (let i = 0; i < a.length; i += 1) diff |= a[i]! ^ b[i]!
     return diff === 0
-}
-
-/**
- * Strips the `0x05` prefix from a serialized public key.
- *
- * @param key The key.
- */
-function stripKeyPrefix(key: Uint8Array): Uint8Array {
-    return key.length === 33 ? key.subarray(1) : key
 }
 
 /** Re-exported for convenience. */

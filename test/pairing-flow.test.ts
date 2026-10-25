@@ -20,12 +20,24 @@ import { LavaClient } from '../src/client.js'
 import { MemoryCredentialStore } from '../src/auth/credentials.js'
 import {
     aesCtrEncrypt,
+    concat,
+    generateX25519KeyPair,
     pbkdf2Sha256,
+    toRawPublicKey,
     utf8,
     x25519PublicFromPrivate,
 } from '../src/crypto/primitives.js'
+import { xeddsaSign, xeddsaVerify } from '../src/crypto/curve25519.js'
+import {
+    ADV_PREFIX_ACCOUNT_SIGNATURE,
+    ADV_PREFIX_DEVICE_SIGNATURE,
+    computeAdvIdentityHmac,
+    parseAdvSignedIdentity,
+} from '../src/signal/attestation.js'
+import { encode } from '../src/proto/codec.js'
 import { findNodeChild } from '../src/transport/node/helpers.js'
 import { parseWhatsAppQrPayload } from '../src/qr/whatsapp.js'
+import { fromBase64 } from '../src/auth/credentials.js'
 import type { BinaryNode } from '../src/transport/binary/types.js'
 import type { WaTransport } from '../src/client.js'
 
@@ -63,16 +75,21 @@ class MockTransport implements WaTransport {
 }
 
 /** Builds a client wired to a mock transport. */
-function makeClient(): { client: LavaClient; transport: MockTransport } {
+function makeClient(): {
+    client: LavaClient
+    transport: MockTransport
+    store: MemoryCredentialStore
+} {
     const transport = new MockTransport()
+    const store = new MemoryCredentialStore()
     const client = new LavaClient({
-        credentials: new MemoryCredentialStore(),
+        credentials: store,
         transportFactory: (context) => {
             transport.handlers = context.handlers
             return transport
         },
     })
-    return { client, transport }
+    return { client, transport, store }
 }
 
 /** Waits for a condition to become true. */
@@ -386,6 +403,115 @@ describe('pairing code flow', () => {
                     node.tag === 'ack' &&
                     node.attrs.id === 'note-7' &&
                     node.attrs.class === 'notification',
+            ),
+        )
+
+        client.disconnect()
+    })
+})
+
+describe('pair-success handling', () => {
+    it('answers the server with a signed device identity', async () => {
+        const { client, transport, store } = makeClient()
+        await client.connect()
+
+        const credentials = await store.load()
+        assert.ok(credentials)
+        const identityPublicKey = toRawPublicKey(fromBase64(credentials.identityKeyPair.pub))
+
+        /**
+         * The server proves that the account authorised this device: it
+         * signs the device details with the account key and seals them with
+         * the secret both sides derived during the handshake.
+         */
+        const account = generateX25519KeyPair()
+        const deviceDetails = encode('ADVDeviceIdentity', {
+            rawId: 1,
+            timestamp: 1700000000,
+            keyIndex: 7,
+            accountType: 0,
+            deviceType: 0,
+        })
+        const accountSignature = xeddsaSign(
+            account.privateKey,
+            concat(ADV_PREFIX_ACCOUNT_SIGNATURE, deviceDetails, identityPublicKey),
+        )
+        const signed = encode('ADVSignedDeviceIdentity', {
+            details: deviceDetails,
+            accountSignatureKey: account.publicKey,
+            accountSignature,
+        })
+        const sealed = encode('ADVSignedDeviceIdentityHMAC', {
+            details: signed,
+            hmac: computeAdvIdentityHmac(
+                fromBase64(credentials.advSecretKey ?? ''),
+                signed,
+            ),
+            accountType: 0,
+        })
+
+        transport.handlers.onNode?.({
+            tag: 'iq',
+            attrs: { id: 'ps-1', type: 'set', from: 's.whatsapp.net' },
+            content: [
+                {
+                    tag: 'pair-success',
+                    attrs: {},
+                    content: [
+                        { tag: 'device-identity', attrs: {}, content: sealed },
+                        {
+                            tag: 'device',
+                            attrs: { jid: '6281234567890:3@s.whatsapp.net', lid: '12345:3@lid' },
+                        },
+                        { tag: 'platform', attrs: { name: 'android' } },
+                    ],
+                },
+            ],
+        })
+
+        /**
+         * The server expects the answer — without it the socket is closed.
+         */
+        await waitFor(() =>
+            transport.sent.some(
+                (node) =>
+                    node.tag === 'iq' &&
+                    node.attrs.type === 'result' &&
+                    node.attrs.id === 'ps-1' &&
+                    findNodeChild(node, 'pair-device-sign') !== undefined,
+            ),
+        )
+
+        const answer = transport.sent.find(
+            (node) =>
+                node.tag === 'iq' &&
+                node.attrs.type === 'result' &&
+                node.attrs.id === 'ps-1',
+        )
+        assert.ok(answer)
+        const sign = findNodeChild(answer, 'pair-device-sign')
+        assert.ok(sign)
+        const identity = findNodeChild(sign, 'device-identity')
+        assert.ok(identity)
+        assert.equal(identity.attrs['key-index'], '7')
+        assert.ok(identity.content instanceof Uint8Array)
+
+        /**
+         * The answer carries the device's own signature, so the account can
+         * tell that the device holds the identity key it registered.
+         */
+        const parsed = parseAdvSignedIdentity(identity.content)
+        assert.ok(parsed.deviceSignature)
+        assert.ok(
+            xeddsaVerify(
+                identityPublicKey,
+                concat(
+                    ADV_PREFIX_DEVICE_SIGNATURE,
+                    deviceDetails,
+                    identityPublicKey,
+                    account.publicKey,
+                ),
+                parsed.deviceSignature,
             ),
         )
 
