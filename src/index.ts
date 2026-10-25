@@ -332,6 +332,21 @@ export {
 } from './signal/manager.js'
 
 export {
+    decryptSignalMessage,
+    decryptSignalMessageWithFallback,
+    deserializePreKeyMessage,
+    deserializeSignalMessage,
+    findMatchingSession,
+    initiateSessionIncoming,
+    initiateSessionOutgoing,
+    type ParsedPreKeyMessage,
+    type ParsedSignalMessage,
+    type SignalSession,
+} from './signal/session.js'
+
+export { MAX_PREV_SESSIONS } from './signal/constants.js'
+
+export {
     deserializeIdentity,
     deserializeInitialExchangeInfo,
     deserializeMessageKey,

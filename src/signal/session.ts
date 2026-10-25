@@ -27,6 +27,7 @@ import { decode, encode } from '../proto/codec.js'
 import {
     CHAIN_KEY_LABEL,
     FUTURE_MESSAGES_MAX,
+    MAX_PREV_SESSIONS,
     MAX_UNUSED_KEYS,
     MESSAGE_KEY_LABEL,
     SIGNAL_MAC_SIZE,
@@ -117,6 +118,14 @@ export interface SignalSession {
     prevSendChainHighestIndex: number
     /** The base key identifying this session. */
     aliceBaseKey: Uint8Array
+    /**
+     * The sessions this one replaced, newest first.
+     *
+     * A peer may re-key a conversation, and the messages that were encrypted
+     * with the old key can still arrive afterwards. The replaced sessions are
+     * kept so those messages can still be read.
+     */
+    prevSessions: SignalSession[]
 }
 
 /** A remote pre-key bundle. */
@@ -259,6 +268,7 @@ export function initiateSessionOutgoing(
         },
         prevSendChainHighestIndex: 0,
         aliceBaseKey: localOneTimeBase.pubKey,
+        prevSessions: [],
     }
 }
 
@@ -310,7 +320,46 @@ export function initiateSessionIncoming(
         initialExchangeInfo: null,
         prevSendChainHighestIndex: 0,
         aliceBaseKey: baseKey,
+        prevSessions: [],
     }
+}
+
+/**
+ * Finds the session a pre-key message belongs to.
+ *
+ * A sender keeps the pre-key envelope for every message it sends until it
+ * sees a reply, so a pre-key message does not necessarily start a new
+ * session: it may well belong to one that is already established. The base
+ * key of the message identifies the session it belongs to.
+ *
+ * When the match is one of the replaced sessions, that session is promoted:
+ * it becomes the current one and the session it replaces joins the list of
+ * previous sessions.
+ *
+ * @param session The current session of the peer, if there is one.
+ * @param sessionBaseKey The base key the message was encrypted with.
+ */
+export function findMatchingSession(
+    session: SignalSession | undefined,
+    sessionBaseKey: Uint8Array,
+): SignalSession | null {
+    if (!session) return null
+    const baseKey = toSerializedPublicKey(sessionBaseKey)
+    if (session.aliceBaseKey.length > 0 && equalBytes(session.aliceBaseKey, baseKey)) {
+        return session
+    }
+    for (let index = 0; index < session.prevSessions.length; index += 1) {
+        const previous = session.prevSessions[index]!
+        if (previous.aliceBaseKey.length === 0) continue
+        if (!equalBytes(previous.aliceBaseKey, baseKey)) continue
+        const remaining = session.prevSessions.slice()
+        remaining.splice(index, 1)
+        return {
+            ...previous,
+            prevSessions: [session, ...remaining].slice(0, MAX_PREV_SESSIONS),
+        }
+    }
+    return null
 }
 
 /**
@@ -583,6 +632,46 @@ export function decryptSignalMessage(
         parsed.ciphertext,
     )
     return { session: updatedSession, plaintext }
+}
+
+/**
+ * Decrypts a message, falling back to the replaced sessions.
+ *
+ * A message that was encrypted with a session the peer has already replaced
+ * can still arrive late. When the current session cannot read it, the
+ * sessions it replaced are tried; the one that succeeds becomes the current
+ * session again.
+ *
+ * @param session The current session of the peer.
+ * @param parsed The parsed message.
+ */
+export function decryptSignalMessageWithFallback(
+    session: SignalSession,
+    parsed: ParsedSignalMessage,
+): { session: SignalSession; plaintext: Uint8Array } {
+    try {
+        return decryptSignalMessage(session, parsed)
+    } catch (error) {
+        let lastError: unknown = error
+        for (let index = 0; index < session.prevSessions.length; index += 1) {
+            const previous = session.prevSessions[index]!
+            try {
+                const result = decryptSignalMessage(previous, parsed)
+                const remaining = session.prevSessions.slice()
+                remaining.splice(index, 1)
+                return {
+                    session: {
+                        ...result.session,
+                        prevSessions: [session, ...remaining].slice(0, MAX_PREV_SESSIONS),
+                    },
+                    plaintext: result.plaintext,
+                }
+            } catch (previousError) {
+                lastError = previousError
+            }
+        }
+        throw lastError
+    }
 }
 
 // ─── Serialisation ───────────────────────────────────────────────────────────

@@ -100,6 +100,13 @@ export interface SerializedSignalSession {
     prevSendChainHighestIndex: number
     /** The base key identifying this session, hex. */
     aliceBaseKey: string
+    /**
+     * The sessions this one replaced, newest first.
+     *
+     * Only the outermost session carries them; the replaced sessions are
+     * stored next to each other, not inside each other.
+     */
+    prevSessions?: SerializedSignalSession[]
 }
 
 /**
@@ -254,6 +261,19 @@ export function deserializeInitialExchangeInfo(
  * @param session The session.
  */
 export function serializeSignalSession(session: SignalSession): SerializedSignalSession {
+    return serializeSession(session, true)
+}
+
+/**
+ * Serialises one session.
+ *
+ * @param session The session.
+ * @param withPrevious Whether the replaced sessions belong to this one.
+ */
+function serializeSession(
+    session: SignalSession,
+    withPrevious: boolean,
+): SerializedSignalSession {
     return {
         local: serializeIdentity(session.local),
         remote: serializeIdentity(session.remote),
@@ -263,6 +283,9 @@ export function serializeSignalSession(session: SignalSession): SerializedSignal
         initialExchangeInfo: serializeInitialExchangeInfo(session.initialExchangeInfo),
         prevSendChainHighestIndex: session.prevSendChainHighestIndex,
         aliceBaseKey: toHex(session.aliceBaseKey),
+        ...(withPrevious && session.prevSessions.length > 0
+            ? { prevSessions: session.prevSessions.map((entry) => serializeSession(entry, false)) }
+            : {}),
     }
 }
 
@@ -272,6 +295,19 @@ export function serializeSignalSession(session: SignalSession): SerializedSignal
  * @param session The serialised session.
  */
 export function deserializeSignalSession(session: SerializedSignalSession): SignalSession {
+    return deserializeSession(session, true)
+}
+
+/**
+ * Restores one session.
+ *
+ * @param session The serialised session.
+ * @param withPrevious Whether the replaced sessions belong to this one.
+ */
+function deserializeSession(
+    session: SerializedSignalSession,
+    withPrevious: boolean,
+): SignalSession {
     return {
         local: deserializeIdentity(session.local),
         remote: deserializeIdentity(session.remote),
@@ -281,6 +317,10 @@ export function deserializeSignalSession(session: SerializedSignalSession): Sign
         initialExchangeInfo: deserializeInitialExchangeInfo(session.initialExchangeInfo),
         prevSendChainHighestIndex: session.prevSendChainHighestIndex,
         aliceBaseKey: fromHex(session.aliceBaseKey),
+        prevSessions:
+            withPrevious && session.prevSessions
+                ? session.prevSessions.map((entry) => deserializeSession(entry, false))
+                : [],
     }
 }
 

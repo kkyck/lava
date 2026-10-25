@@ -71,15 +71,19 @@ export function decodeSignalSessionRecord(
     const decoded = decode('RecordStructure', raw)
     const current = requireRecord(decoded.currentSession, 'currentSession')
     const previous = asArray(decoded.previousSessions)
-    return {
-        session: decodeSessionStructure(current, 'currentSession', localPrivateKey),
-        previousSessions: previous.map((entry, index) =>
-            decodeSessionStructure(
-                requireRecord(entry, `previousSessions[${index}]`),
-                `previousSessions[${index}]`,
-                localPrivateKey,
-            ),
+    const previousSessions = previous.map((entry, index) =>
+        decodeSessionStructure(
+            requireRecord(entry, `previousSessions[${index}]`),
+            `previousSessions[${index}]`,
+            localPrivateKey,
         ),
+    )
+    return {
+        session: {
+            ...decodeSessionStructure(current, 'currentSession', localPrivateKey),
+            prevSessions: previousSessions,
+        },
+        previousSessions,
     }
 }
 
@@ -167,7 +171,7 @@ export function decodeSenderKeyStates(
  */
 export function encodeSignalSessionRecord(
     session: SignalSession,
-    previousSessions: SignalSession[] = [],
+    previousSessions: SignalSession[] = session.prevSessions,
 ): Uint8Array {
     return encode('RecordStructure', {
         currentSession: encodeSessionStructure(session),
@@ -300,6 +304,7 @@ function decodeSessionStructure(
             structure.aliceBaseKey instanceof Uint8Array
                 ? structure.aliceBaseKey
                 : new Uint8Array(0),
+        prevSessions: [],
     }
 }
 

@@ -13,12 +13,15 @@
 import { concat, equalBytes } from '../crypto/primitives.js'
 import { decode } from '../proto/codec.js'
 import { SignalKeyStore } from './keys.js'
+import { MAX_PREV_SESSIONS } from './constants.js'
 import {
     decryptSignalMessage,
+    decryptSignalMessageWithFallback,
     deserializePreKeyMessage,
     deserializeSignalMessage,
     ecdh,
     encryptSignalMessage,
+    findMatchingSession,
     generateSerializedKeyPair,
     initiateSessionIncoming,
     initiateSessionOutgoing,
@@ -301,6 +304,26 @@ export class SignalSessionManager {
 
         if (encType === 'pkmsg') {
             const preKey = deserializePreKeyMessage(payload)
+
+            /**
+             * A pre-key message does not necessarily start a new session: the
+             * sender keeps the pre-key envelope for every message it sends
+             * until it sees a reply, so the message may well belong to the
+             * session that was established for the very same base key.
+             */
+            const current = this.sessions.get(key)
+            const matching = findMatchingSession(current, preKey.sessionBaseKey)
+            if (matching) {
+                const result = decryptSignalMessage(matching, preKey)
+                this.storeSession(key, result.session)
+                this.keyStore.setRemoteIdentity(key, preKey.remote.pubKey)
+                return {
+                    plaintext: result.plaintext,
+                    sender: senderAddress,
+                    registrationId: matching.remote.regId,
+                }
+            }
+
             const registration = this.keyStore.getRegistrationInfo()
             if (!registration) {
                 throw new Error('signal: device is not registered')
@@ -311,11 +334,13 @@ export class SignalSessionManager {
                     `signal: signed pre-key ${preKey.localSignedPreKeyId} is not available`,
                 )
             }
+            // The one-time pre-key is only consumed once the session could be
+            // established: a pre-key that was thrown away without a session
+            // would be handed out again and derive a different secret.
             const oneTime =
                 preKey.localOneTimeKeyId !== null
-                    ? this.keyStore.consumePreKey(preKey.localOneTimeKeyId)
+                    ? this.keyStore.getPreKey(preKey.localOneTimeKeyId)
                     : undefined
-            if (oneTime) this.options.onPreKeyConsumed?.(oneTime.keyId)
             const session = initiateSessionIncoming(
                 {
                     regId: registration.registrationId,
@@ -342,8 +367,27 @@ export class SignalSessionManager {
                     },
                 },
             )
-            const result = decryptSignalMessage(session, preKey)
+
+            /**
+             * The session this one replaces is kept: a message that was
+             * encrypted with it can still arrive afterwards.
+             */
+            const established: SignalSession = current
+                ? {
+                      ...session,
+                      prevSessions: [current, ...current.prevSessions].slice(
+                          0,
+                          MAX_PREV_SESSIONS,
+                      ),
+                  }
+                : session
+
+            const result = decryptSignalMessage(established, preKey)
             this.storeSession(key, result.session)
+            if (oneTime) {
+                this.keyStore.consumePreKey(oneTime.keyId)
+                this.options.onPreKeyConsumed?.(oneTime.keyId)
+            }
             this.keyStore.setRemoteIdentity(key, preKey.remote.pubKey)
             return {
                 plaintext: result.plaintext,
@@ -357,7 +401,7 @@ export class SignalSessionManager {
             throw new Error(`signal: no session for ${senderAddress}`)
         }
         const parsed = deserializeSignalMessage(payload)
-        const result = decryptSignalMessage(session, parsed)
+        const result = decryptSignalMessageWithFallback(session, parsed)
         this.storeSession(key, result.session)
         return {
             plaintext: result.plaintext,

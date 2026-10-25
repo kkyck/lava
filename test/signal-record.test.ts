@@ -157,6 +157,31 @@ describe('signal record structures', () => {
             assert.equal(hex(decoded.session.rootKey), hex(session.rootKey))
         })
 
+        it('keeps the previous sessions on the decoded session', () => {
+            const session = makeSession()
+            const previous = makeSession({ rootKey: new Uint8Array(32).fill(3) })
+            const encoded = encodeSignalSessionRecord(session, [previous])
+            const decoded = decodeSignalSessionRecord(encoded)
+
+            // The replaced sessions belong to the session, so a client that
+            // only holds the session still has them.
+            assert.equal(decoded.session.prevSessions.length, 1)
+            assert.equal(
+                hex(decoded.session.prevSessions[0]!.rootKey),
+                hex(previous.rootKey),
+            )
+        })
+
+        it('encodes the previous sessions that the session carries', () => {
+            const previous = makeSession({ rootKey: new Uint8Array(32).fill(3) })
+            const session = makeSession({ prevSessions: [previous] })
+            const encoded = encodeSignalSessionRecord(session)
+            const decoded = decodeSignalSessionRecord(encoded)
+
+            assert.equal(decoded.previousSessions.length, 1)
+            assert.equal(hex(decoded.previousSessions[0]!.rootKey), hex(previous.rootKey))
+        })
+
         it('round-trips the retained message keys of a receiving chain', () => {
             const session = makeSession()
             session.recvChains[0]!.unusedMsgKeys.push({
@@ -300,6 +325,7 @@ function makeSession(overrides: Partial<SignalSession> = {}): SignalSession {
         },
         prevSendChainHighestIndex: 5,
         aliceBaseKey: new Uint8Array(33).fill(14),
+        prevSessions: [],
         ...overrides,
     }
 }

@@ -28,6 +28,15 @@ export const MAX_UNUSED_KEYS = 2000
 /** Maximum distance a message counter may be ahead of the current chain. */
 export const FUTURE_MESSAGES_MAX = 2000
 
+/**
+ * Maximum number of superseded sessions kept per peer.
+ *
+ * A peer may re-key a conversation at any time; the messages that were
+ * encrypted with the old key can still arrive afterwards, so the replaced
+ * sessions are kept around for a while.
+ */
+export const MAX_PREV_SESSIONS = 40
+
 /** Label used when deriving the next chain key. */
 export const MESSAGE_KEY_LABEL = new Uint8Array([1])
 

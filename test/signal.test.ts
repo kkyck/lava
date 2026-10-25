@@ -19,6 +19,10 @@ import {
 import { SignalSessionManager } from '../src/signal/manager.js'
 import { SenderKeyManager } from '../src/signal/group.js'
 import { deserializePreKeyMessage, deserializeSignalMessage } from '../src/signal/session.js'
+import { SIGNAL_VERSION } from '../src/signal/constants.js'
+import { prependVersion } from '../src/crypto/primitives.js'
+import { encode } from '../src/proto/codec.js'
+import '../src/proto/schema.js'
 
 const ALICE = '11111111111:0@s.whatsapp.net'
 const BOB = '22222222222:0@s.whatsapp.net'
@@ -201,6 +205,58 @@ describe('signal sessions', () => {
         const alice = makePeer(ALICE)
         assert.throws(() => alice.manager.encryptForDevice(BOB, utf8('x')), /no session/)
     })
+
+    it('decrypts a pre-key message that belongs to an established session', () => {
+        const alice = makePeer(ALICE)
+        const bob = makePeer(BOB)
+        bob.store.addPreKey(generatePreKeyPair(generatePreKeyId()))
+        startSession(alice, bob, BOB, ALICE)
+
+        const first = alice.manager.encryptForDevice(BOB, utf8('first'))
+        assert.equal(first.encType, 'pkmsg')
+        bob.manager.decryptFromDevice(ALICE, first.ciphertext, 'pkmsg')
+        const preKeysLeft = bob.store.getPreKeyCount()
+
+        /**
+         * A sender keeps the pre-key envelope for every message it produces
+         * until it sees a reply, so the receiver gets several pre-key
+         * messages that all belong to the same session.
+         */
+        const second = alice.manager.encryptForDevice(BOB, utf8('second'))
+        assert.equal(second.encType, 'msg')
+        const wrapped = wrapInPreKeyEnvelope(first.ciphertext, second.ciphertext)
+
+        const out = bob.manager.decryptFromDevice(ALICE, wrapped, 'pkmsg')
+        assert.equal(fromUtf8(out.plaintext), 'second')
+        // The pre-key of the established session is not consumed a second
+        // time, and the session itself is not replaced.
+        assert.equal(bob.store.getPreKeyCount(), preKeysLeft)
+        assert.equal(bob.manager.sessionCount, 1)
+    })
+
+    it('keeps the replaced session when a new session is started', () => {
+        const alice = makePeer(ALICE)
+        const bob = makePeer(BOB)
+        bob.store.addPreKey(generatePreKeyPair(generatePreKeyId()))
+        startSession(alice, bob, BOB, ALICE)
+
+        const first = alice.manager.encryptForDevice(BOB, utf8('first'))
+        bob.manager.decryptFromDevice(ALICE, first.ciphertext, 'pkmsg')
+
+        // A different peer re-keys the conversation under the same address.
+        const second = makePeer(ALICE)
+        startSession(second, bob, BOB, ALICE)
+        const rekeyed = second.manager.encryptForDevice(BOB, utf8('rekeyed'))
+        assert.equal(rekeyed.encType, 'pkmsg')
+        bob.manager.decryptFromDevice(ALICE, rekeyed.ciphertext, 'pkmsg')
+
+        // The session that was replaced is kept, so a message that was
+        // encrypted with it can still be read.
+        const late = alice.manager.encryptForDevice(BOB, utf8('late'))
+        assert.equal(late.encType, 'msg')
+        const out = bob.manager.decryptFromDevice(ALICE, late.ciphertext, 'msg')
+        assert.equal(fromUtf8(out.plaintext), 'late')
+    })
 })
 
 describe('sender keys (group chats)', () => {
@@ -273,4 +329,28 @@ function utf8(value: string): Uint8Array {
 
 function fromUtf8(value: Uint8Array): string {
     return new TextDecoder().decode(value)
+}
+
+/**
+ * Wraps a plain signal message in the pre-key envelope of another one.
+ *
+ * The envelope of the original message is reused, so both messages carry the
+ * same base key and therefore belong to the same session.
+ *
+ * @param original The pre-key message whose envelope is reused.
+ * @param message The plain signal message to wrap.
+ */
+function wrapInPreKeyEnvelope(original: Uint8Array, message: Uint8Array): Uint8Array {
+    const parsed = deserializePreKeyMessage(original)
+    const payload = encode('PreKeySignalMessage', {
+        registrationId: parsed.remote.regId,
+        ...(parsed.localOneTimeKeyId !== null
+            ? { preKeyId: parsed.localOneTimeKeyId }
+            : {}),
+        signedPreKeyId: parsed.localSignedPreKeyId,
+        baseKey: parsed.sessionBaseKey,
+        identityKey: parsed.remote.pubKey,
+        message,
+    })
+    return prependVersion(payload, SIGNAL_VERSION)
 }
