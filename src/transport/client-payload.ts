@@ -22,11 +22,29 @@ import {
     DeviceProps_PlatformType,
 } from '../proto/enums.js'
 
-/** The WhatsApp Web version this library reports by default. */
-export const DEFAULT_WEB_VERSION = '2.3000.1043028647'
+/**
+ * The WhatsApp Web version this library reports by default.
+ *
+ * The server refuses a client it considers too old with the reason 405, so
+ * the version has to be one the server still accepts.
+ */
+export const DEFAULT_WEB_VERSION = '2.3000.1094123276'
 
-/** The WhatsApp for Android version this library reports by default. */
-export const DEFAULT_ANDROID_VERSION = '2.25.28.82'
+/**
+ * The WhatsApp for Android version this library reports by default.
+ *
+ * The server refuses a client it considers too old with the reason 405, so
+ * the version has to be one the server still accepts.
+ */
+export const DEFAULT_ANDROID_VERSION = '2.26.42.71'
+
+/**
+ * The WhatsApp for iOS version this library reports by default.
+ *
+ * iOS and Android share the version numbering of WhatsApp itself, so the
+ * iOS default is the same build as the Android one.
+ */
+export const DEFAULT_IOS_VERSION = DEFAULT_ANDROID_VERSION
 
 /** A parsed application version. */
 export interface AppVersion {
@@ -105,6 +123,13 @@ export interface DeviceProfile {
     manufacturer: string
     /** Hardware board identifier (Android only). */
     deviceBoard?: string
+    /**
+     * The OS name the `DeviceProps` message reports.
+     *
+     * WhatsApp Web announces the desktop it runs on, so a browser profile
+     * overrides the name its `os` field would produce.
+     */
+    propsOs?: string
     /** Mobile country code. */
     mcc?: string
     /** Mobile network code. */
@@ -152,8 +177,28 @@ export const DEFAULT_IOS_PROFILE: DeviceProfile = Object.freeze({
     mnc: '000',
     localeLanguageIso6391: 'en',
     localeCountryIso31661Alpha2: 'US',
-    appVersion: DEFAULT_ANDROID_VERSION,
+    appVersion: DEFAULT_IOS_VERSION,
     distributionChannel: 'appstore',
+})
+
+/**
+ * The WhatsApp Web profile used by default.
+ *
+ * WhatsApp Web is not a phone: it announces the browser build, not the
+ * version of the Android app, and the server refuses a client it considers
+ * too old with the reason 405.
+ */
+export const DEFAULT_WEB_PROFILE: DeviceProfile = Object.freeze({
+    os: 'android',
+    device: 'Desktop',
+    osVersion: '10.0.22631',
+    osBuildNumber: '22631',
+    manufacturer: 'Microsoft Corporation',
+    propsOs: 'Windows',
+    localeLanguageIso6391: 'en',
+    localeCountryIso31661Alpha2: 'US',
+    appVersion: DEFAULT_WEB_VERSION,
+    distributionChannel: 'website',
 })
 
 /** Configuration shared by every payload builder. */
@@ -173,6 +218,20 @@ export interface CommonPayloadConfig {
 }
 
 /**
+ * Returns the app version a device profile announces.
+ *
+ * A profile that does not name a version falls back to the default of its
+ * own platform: an iOS device announces the iOS build, an Android device
+ * the Android one.
+ *
+ * @param profile The device profile.
+ */
+export function resolveAppVersion(profile: DeviceProfile): string {
+    if (profile.appVersion) return profile.appVersion
+    return profile.os === 'ios' ? DEFAULT_IOS_VERSION : DEFAULT_ANDROID_VERSION
+}
+
+/**
  * Builds the `UserAgent` sub-message for a mobile device.
  *
  * @param profile The device profile.
@@ -186,7 +245,7 @@ function buildMobileUserAgent(profile: DeviceProfile): Record<string, unknown> {
         : profile.business
           ? ClientPayload_UserAgent_Platform.SMB_ANDROID
           : ClientPayload_UserAgent_Platform.ANDROID
-    const version = parseAppVersion(profile.appVersion ?? DEFAULT_ANDROID_VERSION)
+    const version = parseAppVersion(resolveAppVersion(profile))
     const agent: Record<string, unknown> = {
         platform,
         releaseChannel: ClientPayload_UserAgent_ReleaseChannel.RELEASE,
@@ -354,7 +413,7 @@ export function buildMobileRegistrationPayload(
     if (!Number.isSafeInteger(config.signedPreKeyId) || config.signedPreKeyId <= 0) {
         throw new Error('mobile registration payload requires a valid signedPreKeyId')
     }
-    const versionBase = config.deviceProfile.appVersion ?? DEFAULT_ANDROID_VERSION
+    const versionBase = resolveAppVersion(config.deviceProfile)
     const payload: Record<string, unknown> = {
         passive: config.passive === true,
         pull: config.pull ?? true,
@@ -396,7 +455,7 @@ export function buildDeviceProps(
 ): Uint8Array {
     const version = parseOsVersion(profile.osVersion)
     return encode('DeviceProps', {
-        os: profile.os === 'ios' ? 'iOS' : 'Android',
+        os: profile.propsOs ?? (profile.os === 'ios' ? 'iOS' : 'Android'),
         version,
         platformType,
         requireFullSync: false,

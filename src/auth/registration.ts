@@ -145,7 +145,7 @@ export interface LavaRegistrationSession {
     deviceId: Uint8Array
     /** The random identity id of the device. */
     identityId: Uint8Array
-    /** The advertising id of the device, hexadecimal. */
+    /** The advertising id of the device, a UUID. */
     advertisingId: string
     /** The installation folder of the device. */
     installId: string
@@ -185,6 +185,8 @@ export interface LavaNumberStatus {
     canRegister: boolean
     /** The canonical form of the number, when the server named one. */
     canonicalNumber?: string
+    /** The reason the server gave, when it named one. */
+    reason?: string
     /** The raw answer of the server. */
     raw: Record<string, unknown>
 }
@@ -537,7 +539,7 @@ export class LavaRegistration {
             identity,
             deviceId: randomBytesOf(16),
             identityId,
-            advertisingId: toHex(randomBytesOf(16)),
+            advertisingId: toUuid(randomBytesOf(16)),
             installId: toHex(randomBytesOf(8)),
             accessSessionId: toBase64Url(randomBytesOf(16)),
             country,
@@ -547,6 +549,15 @@ export class LavaRegistration {
 
     /**
      * Asks the server whether a number is already an account.
+     *
+     * The server answers a request it could not parse with a `fail` status
+     * that names the offending parameter. Such an answer says nothing about
+     * the number, so it is reported as the failure it is instead of being
+     * read as "the number is free".
+     *
+     * A number that is not an account yet can be claimed, and the server
+     * says so by naming the methods it can deliver a verification code
+     * with.
      *
      * @param session The registration session.
      * @param options The options.
@@ -558,14 +569,41 @@ export class LavaRegistration {
         const payload = buildCommonPairs(session, options, false)
         const raw = await postRegistration('/exist', session, payload, options)
         const status = String(raw.status ?? '')
+        const state = typeof raw.state === 'string' ? raw.state : ''
+
+        // A request the server could not parse names the parameter it
+        // choked on. The answer is about the request, not about the number.
+        const param = typeof raw.param === 'string' ? raw.param : ''
+        const failureReason =
+            typeof raw.failure_reason === 'string' ? raw.failure_reason : ''
+        if (param || failureReason) {
+            throw new Error(
+                `lava: the registration server refused the request` +
+                    (param ? ` (parameter "${param}")` : '') +
+                    (failureReason ? `: ${failureReason}` : ''),
+            )
+        }
+
+        // The number of the ways the server can deliver a code: a number
+        // that has none cannot be claimed.
+        const methods =
+            typeof raw.num_visible_dbs_methods === 'number'
+                ? raw.num_visible_dbs_methods
+                : Array.isArray(raw.fallback_methods)
+                  ? raw.fallback_methods.length
+                  : 0
+
+        const registered = state === 'existing' || status === 'ok'
+        const canRegister =
+            state === 'missing' ||
+            raw.can_register === true ||
+            methods > 0 ||
+            status === ''
         return {
-            registered: status === 'ok' || raw.state === 'existing',
-            canRegister:
-                status === 'fail' ||
-                raw.state === 'missing' ||
-                raw.can_register === true ||
-                status === '',
+            registered,
+            canRegister,
             ...(typeof raw.login === 'string' ? { canonicalNumber: raw.login } : {}),
+            ...(typeof raw.reason === 'string' ? { reason: raw.reason } : {}),
             raw,
         }
     }
@@ -897,6 +935,23 @@ function buildDeviceAid(session: LavaRegistrationSession): string {
 function stripKeyPrefix(value: Uint8Array): Uint8Array {
     if (value.length === 33 && value[0] === 0x05) return value.subarray(1)
     return value
+}
+
+/**
+ * Formats bytes as a UUID.
+ *
+ * The registration server refuses a request whose `fdid` is not a UUID — it
+ * answers with `{"failure_reason":"bad_format","param":"fdid"}` — so the
+ * advertising id has to carry the dashes a UUID carries.
+ *
+ * @param value The 16 bytes of the id.
+ */
+function toUuid(value: Uint8Array): string {
+    const hex = toHex(value)
+    return (
+        `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-` +
+        `${hex.slice(16, 20)}-${hex.slice(20, 32)}`
+    )
 }
 
 /**

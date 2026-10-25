@@ -180,6 +180,11 @@ const client = new LavaClient({
 })
 ```
 
+The server refuses a client it considers too old with the reason **405**, so
+the reported version has to be one the server still accepts. The defaults
+(`2.26.42.71` for the mobile transports, `2.3000.1094123276` for the web
+transport) are the newest builds that were measured to work.
+
 ---
 
 ## Registering a phone number
@@ -273,6 +278,16 @@ The payload is the comma-separated format the official client uses:
 ```text
 <ref>,<base64 noise pubkey>,<base64 identity pubkey>,<base64 adv secret>,<platform>
 ```
+
+The server hands out a handful of references, each of which is valid for a
+limited time. The client walks through them and emits a new `auth_qr` event
+as the current one expires — the first reference of a set lives for a minute,
+the following ones for twenty seconds each. The attestation secret is
+rotated with every set, so a leaked QR code cannot be replayed.
+
+While the phone scans, the client keeps the socket alive: WhatsApp closes a
+connection that stays silent, so the client pings the server every few
+seconds and re-establishes the connection when a ping goes unanswered.
 
 ### Pairing code
 
@@ -852,7 +867,7 @@ model, no code generation at runtime, one output buffer per message.
 ```bash
 npm run typecheck   # tsc --noEmit
 npm run build       # compile to dist/
-npm test            # 416 tests
+npm test            # 440 tests
 npm run bench       # memory benchmark
 npm run size        # size report
 ```

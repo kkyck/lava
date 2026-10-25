@@ -42,6 +42,8 @@ import {
 } from './appstate/sync.js'
 import { AppStateStore, type AppStateStoreSnapshot } from './appstate/store.js'
 import { toHex, generateX25519KeyPair, toSerializedPublicKey } from './crypto/primitives.js'
+import { randomBytesOf } from './crypto/primitives.js'
+import { QrFlow } from './qr/flow.js'
 import { createSilentLogger, type WaLogger } from './logger.js'
 import {
     collectInboundEncryptions,
@@ -136,6 +138,8 @@ import {
 import type { BinaryNode } from './transport/binary/types.js'
 import {
     DEFAULT_ANDROID_PROFILE,
+    DEFAULT_IOS_PROFILE,
+    DEFAULT_WEB_PROFILE,
     DEFAULT_WEB_VERSION,
     buildDeviceProps,
     buildLoginPayload,
@@ -145,12 +149,14 @@ import {
     type DeviceProfile,
 } from './transport/client-payload.js'
 import { DeviceProps_PlatformType } from './proto/enums.js'
+import { KeepAlive } from './transport/keepalive.js'
 import { MobileTransport } from './transport/mobile.js'
 import { WebTransport } from './transport/web.js'
 import type { NoiseSessionConfig } from './transport/noise-session.js'
 import type { TransportHandlers } from './transport/types.js'
 import {
     buildAckNode,
+    buildIqResultNode,
     buildNotificationAckNode,
     buildReceiptNode,
     buildRetryReceiptNode,
@@ -474,6 +480,7 @@ export class LavaClient extends EventEmitter {
 
     private credentials: CredentialSnapshot | null = null
     private transport: WaTransport | null = null
+    private keepAlive: KeepAlive | null = null
     private state: WaConnectionState = 'disconnected'
     private reconnectTimer: NodeJS.Timeout | null = null
     private stopping = false
@@ -494,9 +501,20 @@ export class LavaClient extends EventEmitter {
         finished: boolean
     } | null = null
 
-    /** The QR references handed out by the server. */
-    private qrRefs: string[] = []
-    private qrRefIndex = 0
+    /**
+     * The QR references handed out by the server and the rotation between
+     * them.
+     */
+    private readonly qrFlow = new QrFlow({
+        buildQr: (ref) => {
+            const credentials = this.credentials
+            return credentials ? this.buildQrPayload(ref, credentials) : ''
+        },
+        emitQr: (qr, ttlMs) => {
+            if (!qr) return
+            this.emit(LavaClient.AUTH_QR, { qr, ttlMs })
+        },
+    })
 
     /** The stanzas a retry receipt was already sent for. */
     private readonly retryCounts = new Map<string, number>()
@@ -718,6 +736,7 @@ export class LavaClient extends EventEmitter {
         }
 
         this.setState(credentials.meJid ? 'connected' : 'pairing')
+        this.startKeepAlive(transport)
         await this.afterConnect()
     }
 
@@ -730,10 +749,47 @@ export class LavaClient extends EventEmitter {
             clearTimeout(this.reconnectTimer)
             this.reconnectTimer = null
         }
+        this.stopKeepAlive()
+        this.qrFlow.clear()
         this.setState('closing')
         this.transport?.close()
         this.transport = null
         this.setState('disconnected')
+    }
+
+    /**
+     * Starts the keepalive of a transport.
+     *
+     * WhatsApp closes a socket that stays silent, so the client pings the
+     * server every few seconds. A ping that never comes back proves that the
+     * socket is dead, and the connection is re-established.
+     *
+     * @param transport The transport to keep alive.
+     */
+    private startKeepAlive(transport: WaTransport): void {
+        this.stopKeepAlive()
+        const keepAlive = new KeepAlive({
+            query: (node, timeoutMs) => transport.query(node, timeoutMs),
+            onFailure: (error) => {
+                this.warn('keepalive: the ping failed, the socket is dead', error)
+                // The socket is gone: close it and let the reconnect logic
+                // open a fresh one.
+                transport.close()
+                this.handleClose(error)
+            },
+            onClockSkewMs: (skewMs) => {
+                this.logDebug('keepalive: the clock skew', { skewMs })
+            },
+        })
+        this.keepAlive = keepAlive
+        keepAlive.start()
+    }
+
+    /** Stops the keepalive. */
+    private stopKeepAlive(): void {
+        if (!this.keepAlive) return
+        this.keepAlive.stop()
+        this.keepAlive = null
     }
 
     /** Emits the connection state and updates the internal state. */
@@ -907,21 +963,33 @@ export class LavaClient extends EventEmitter {
      * So the profile stored with the session wins over the default, and only
      * an explicitly configured profile overrides the stored one.
      *
+     * The default depends on the transport: the mobile transport announces
+     * a phone, the web transport announces a browser. The server refuses a
+     * client it considers too old with the reason 405, so the default
+     * version always has to be one the server still accepts.
+     *
      * @param stored The stored device profile, when the session has one.
      */
     private resolveDeviceProfile(
         stored?: CredentialSnapshot['deviceInfo'],
     ): DeviceProfile {
         if (this.options.deviceProfile) return this.options.deviceProfile
+        const mode = this.options.transport ?? 'mobile'
+        if (mode === 'web') {
+            // WhatsApp Web does not keep a phone fingerprint.
+            return { ...DEFAULT_WEB_PROFILE }
+        }
         if (!stored) return DEFAULT_ANDROID_PROFILE
+        const fallback =
+            stored.os === 'ios' ? DEFAULT_IOS_PROFILE : DEFAULT_ANDROID_PROFILE
         return {
-            ...DEFAULT_ANDROID_PROFILE,
-            os: stored.os ?? 'android',
-            appVersion: stored.appVersion ?? DEFAULT_ANDROID_PROFILE.appVersion,
-            device: stored.device ?? DEFAULT_ANDROID_PROFILE.device,
-            osVersion: stored.osVersion ?? DEFAULT_ANDROID_PROFILE.osVersion,
-            osBuildNumber: stored.osBuildNumber ?? DEFAULT_ANDROID_PROFILE.osBuildNumber,
-            manufacturer: stored.manufacturer ?? DEFAULT_ANDROID_PROFILE.manufacturer,
+            ...fallback,
+            os: stored.os ?? fallback.os,
+            appVersion: stored.appVersion ?? fallback.appVersion,
+            device: stored.device ?? fallback.device,
+            osVersion: stored.osVersion ?? fallback.osVersion,
+            osBuildNumber: stored.osBuildNumber ?? fallback.osBuildNumber,
+            manufacturer: stored.manufacturer ?? fallback.manufacturer,
             ...(stored.deviceBoard !== undefined ? { deviceBoard: stored.deviceBoard } : {}),
             ...(stored.mcc !== undefined ? { mcc: stored.mcc } : {}),
             ...(stored.mnc !== undefined ? { mnc: stored.mnc } : {}),
@@ -1237,8 +1305,38 @@ export class LavaClient extends EventEmitter {
             await this.handlePrimaryHello(linkCode)
             return
         }
-        if (linkCode?.attrs.stage === WA_SIGNALING.COMPANION_REG_REFRESH_NOTIFICATION) {
-            // The server asks the companion to refresh its pairing code.
+        if (linkCode?.attrs.stage === WA_SIGNALING.LINK_CODE_STAGE_REFRESH_CODE) {
+            // The server asks for a fresh pairing code.
+            this.send(
+                buildNotificationAckNode(
+                    node.attrs.id,
+                    node.attrs.from ?? HOST_DOMAIN,
+                    node.attrs.type ?? WA_NODE_TAGS.NOTIFICATION,
+                    node.attrs.participant,
+                ),
+            )
+            this.qrFlow.refreshCurrentQr()
+            return
+        }
+        /**
+         * The server asks the companion to rotate its pairing code. The
+         * attestation secret is rotated first, so the acknowledgement and the
+         * new QR code always describe the same state.
+         */
+        if (
+            findNodeChild(node, WA_SIGNALING.COMPANION_REG_REFRESH_NOTIFICATION) !== undefined ||
+            findNodeChild(node, 'pair-device-rotate-qr') !== undefined
+        ) {
+            await this.rotateAdvSecret()
+            this.send(
+                buildNotificationAckNode(
+                    node.attrs.id,
+                    node.attrs.from ?? HOST_DOMAIN,
+                    WA_SIGNALING.COMPANION_REG_REFRESH_NOTIFICATION,
+                    node.attrs.participant,
+                ),
+            )
+            this.qrFlow.refreshCurrentQr()
             return
         }
 
@@ -1393,11 +1491,25 @@ export class LavaClient extends EventEmitter {
      * @param node The stanza.
      */
     private async handleIq(node: BinaryNode): Promise<void> {
+        /**
+         * The server pings the client with an `<iq type="get">` carrying the
+         * `w:p` (or `urn:xmpp:ping`) namespace. The client has to answer it,
+         * or the server considers the client gone and drops the socket.
+         */
+        if (
+            node.attrs.type === WA_IQ_TYPES.GET &&
+            (node.attrs.xmlns === WA_XMLNS.WHATSAPP_PING ||
+                node.attrs.xmlns === WA_XMLNS.XMPP_PING)
+        ) {
+            this.send(buildIqResultNode(node))
+            return
+        }
+
         if (node.attrs.type !== WA_IQ_TYPES.SET) return
 
         const pairDevice = findNodeChild(node, WA_NODE_TAGS.PAIR_DEVICE)
         if (pairDevice) {
-            this.handlePairDevice(pairDevice)
+            await this.handlePairDevice(node, pairDevice)
             return
         }
         const pairSuccess = findNodeChild(node, WA_NODE_TAGS.PAIR_SUCCESS)
@@ -1410,34 +1522,35 @@ export class LavaClient extends EventEmitter {
     /**
      * Handles the `<pair-device>` stanza that carries the QR references.
      *
-     * @param node The stanza.
+     * @param iqNode The IQ stanza the references arrived in.
+     * @param node The `<pair-device>` node.
      */
-    private handlePairDevice(node: BinaryNode): void {
+    private async handlePairDevice(iqNode: BinaryNode, node: BinaryNode): Promise<void> {
         const refs = getNodeChildrenByTag(node, WA_NODE_TAGS.REF)
             .map((ref) => getNodeText(ref))
             .filter((ref) => ref.length > 0)
         if (refs.length === 0) return
-        this.qrRefs = refs
-        this.qrRefIndex = 0
-        this.emitNextQr()
+        /**
+         * The advanced device attestation secret is rotated with every set of
+         * references, so a leaked QR cannot be replayed against a later one.
+         * The rotation happens before the request is answered, so the answer
+         * and the QR always describe the same state.
+         */
+        await this.rotateAdvSecret()
+        /**
+         * The server expects an `<iq type="result">` in reply to the
+         * `pair-device` request. Without it the request stays unanswered and
+         * the server closes the socket.
+         */
+        this.send(buildIqResultNode(iqNode))
+        this.qrFlow.setRefs(refs)
     }
 
     /**
-     * Emits the next QR payload.
+     * Replaces the advanced device attestation secret with a fresh one.
      */
-    private emitNextQr(): void {
-        const ref = this.qrRefs[this.qrRefIndex]
-        if (ref === undefined) return
-        this.qrRefIndex += 1
-        const credentials = this.credentials
-        if (!credentials) return
-        const remaining = this.qrRefs.length - this.qrRefIndex
-        const ttlMs =
-            remaining >= 5 ? WA_DEFAULTS.QR_INITIAL_TTL_MS : WA_DEFAULTS.QR_ROTATION_TTL_MS
-        this.emit(LavaClient.AUTH_QR, {
-            qr: this.buildQrPayload(ref, credentials),
-            ttlMs,
-        })
+    private async rotateAdvSecret(): Promise<void> {
+        await this.updateCredentials({ advSecretKey: toBase64(randomBytesOf(32)) })
     }
 
     /**
