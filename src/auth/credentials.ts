@@ -18,6 +18,8 @@ import { randomBytes } from 'node:crypto'
 import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
+import type { AppStateStoreSnapshot } from '../appstate/store.js'
+
 /** A serialised key pair. */
 export interface StoredKeyPair {
     /** The public key, base64 encoded. */
@@ -114,6 +116,8 @@ export interface CredentialSnapshot {
         osBuildNumber: string
         /** The manufacturer. */
         manufacturer: string
+        /** The platform the device announces. */
+        os?: 'android' | 'ios'
         /** The device board (Android). */
         deviceBoard?: string
         /** The mobile country code. */
@@ -121,6 +125,13 @@ export interface CredentialSnapshot {
         /** The mobile network code. */
         mnc?: string
     }
+    /**
+     * The app-state store: the sync keys and the state of the collections.
+     *
+     * The state has to survive a restart, otherwise the client would ask the
+     * server for a fresh snapshot every time it connects.
+     */
+    appState?: AppStateStoreSnapshot
 }
 
 /**

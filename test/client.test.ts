@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { WaClient } from '../src/client.js'
+import { LavaClient } from '../src/client.js'
 import { MemoryCredentialStore } from '../src/auth/credentials.js'
 import { SignalSessionManager } from '../src/signal/manager.js'
 import { SenderKeyManager } from '../src/signal/group.js'
@@ -93,6 +93,9 @@ class MockTransport implements WaTransport {
     /** The pre-key upload IQs the client sent. */
     readonly uploads: BinaryNode[] = []
 
+    /** The app-state sync IQs the client sent. */
+    readonly appStateSyncs: BinaryNode[] = []
+
     /** The handlers the client registered. */
     handlers: {
         onNode?: (node: BinaryNode) => void
@@ -110,7 +113,7 @@ class MockTransport implements WaTransport {
     rotateError: BinaryNode | null = null
 
     /** The client under test, used to serve its own pre-keys. */
-    client: WaClient | null = null
+    client: LavaClient | null = null
 
     /** Whether the transport was started. */
     started = false
@@ -144,6 +147,7 @@ class MockTransport implements WaTransport {
         const xmlns = node.attrs.xmlns
         if (xmlns === 'usync') return this.answerDeviceList(node)
         if (xmlns === 'w:m') return this.answerMediaConn(node)
+        if (xmlns === 'w:sync:app:state') return this.answerAppStateSync(node)
         if (xmlns === 'encrypt') {
             const keyFetch = findNodeChild(node, 'key_fetch')
             if (keyFetch) return this.answerKeyFetch(node)
@@ -165,10 +169,37 @@ class MockTransport implements WaTransport {
     }
 
     /**
+     * Answers the app-state sync IQ with an empty state for every requested
+     * collection.
+     */
+    private answerAppStateSync(node: BinaryNode): BinaryNode {
+        const sync = (node.content as BinaryNode[])[0]
+        const collections = (sync?.content as BinaryNode[] | undefined) ?? []
+        this.appStateSyncs.push(node)
+        return {
+            tag: 'iq',
+            attrs: { id: node.attrs.id ?? '', type: 'result' },
+            content: [
+                {
+                    tag: 'sync',
+                    attrs: {},
+                    content: collections.map((collection) => ({
+                        tag: 'collection',
+                        attrs: {
+                            name: collection.attrs.name ?? '',
+                            version: '1',
+                            type: 'success',
+                        },
+                    })),
+                },
+            ],
+        }
+    }
+
+    /**
      * Answers the media connection IQ with an upload token and a CDN host.
      */
-    private answerMediaConn(node: BinaryNode): BinaryNode {
-        return {
+    private answerMediaConn(node: BinaryNode): BinaryNode {        return {
             tag: 'iq',
             attrs: { id: node.attrs.id ?? '', type: 'result' },
             content: [
@@ -456,10 +487,10 @@ function intToBytes(length: number, value: number): Uint8Array {
 /** Builds a client wired to a mock transport. */
 function makeClient(
     mode: 'mobile' | 'web' = 'mobile',
-    extra: Partial<ConstructorParameters<typeof WaClient>[0]> = {},
-): { client: WaClient; transport: MockTransport } {
+    extra: Partial<ConstructorParameters<typeof LavaClient>[0]> = {},
+): { client: LavaClient; transport: MockTransport } {
     const transport = new MockTransport()
-    const client = new WaClient({
+    const client = new LavaClient({
         transport: mode,
         credentials: new MemoryCredentialStore(),
         transportFactory: (context) => {
@@ -486,7 +517,7 @@ describe('client lifecycle', () => {
     it('starts the transport and reports the state', async () => {
         const { client, transport } = makeClient()
         const states: string[] = []
-        client.on(WaClient.CONNECTION, ({ state }: { state: string }) => states.push(state))
+        client.on(LavaClient.CONNECTION, ({ state }: { state: string }) => states.push(state))
 
         await client.connect()
         assert.ok(transport.started)
@@ -501,7 +532,7 @@ describe('client lifecycle', () => {
     it('creates credentials on the first connect', async () => {
         const store = new MemoryCredentialStore()
         const transport = new MockTransport()
-        const client = new WaClient({
+        const client = new LavaClient({
             credentials: store,
             transportFactory: () => transport,
         })
@@ -518,12 +549,12 @@ describe('client lifecycle', () => {
     it('reuses the stored credentials', async () => {
         const store = new MemoryCredentialStore()
         const first = new MockTransport()
-        const clientA = new WaClient({ credentials: store, transportFactory: () => first })
+        const clientA = new LavaClient({ credentials: store, transportFactory: () => first })
         await clientA.connect()
         const snapshotA = await store.load()
 
         const second = new MockTransport()
-        const clientB = new WaClient({ credentials: store, transportFactory: () => second })
+        const clientB = new LavaClient({ credentials: store, transportFactory: () => second })
         await clientB.connect()
         const snapshotB = await store.load()
 
@@ -557,7 +588,7 @@ describe('client lifecycle', () => {
         await client.connect()
 
         let paired: { meJid?: string; meLid?: string } | null = null
-        client.on(WaClient.AUTH_PAIRED, (event: { meJid?: string }) => {
+        client.on(LavaClient.AUTH_PAIRED, (event: { meJid?: string }) => {
             paired = event
         })
 
@@ -574,7 +605,7 @@ describe('client lifecycle', () => {
 
 describe('client pre-keys', () => {
     /** Connects a client and marks it as paired. */
-    async function pairedClient(): Promise<{ client: WaClient; transport: MockTransport }> {
+    async function pairedClient(): Promise<{ client: LavaClient; transport: MockTransport }> {
         const pair = makeClient()
         await pair.client.connect()
         pair.transport.push({
@@ -718,7 +749,7 @@ describe('client pre-keys', () => {
     it('remembers that the server holds a batch of pre-keys', async () => {
         const store = new MemoryCredentialStore()
         const transport = new MockTransport()
-        const client = new WaClient({
+        const client = new LavaClient({
             credentials: store,
             transportFactory: (context) => {
                 transport.handlers = context.handlers
@@ -774,7 +805,7 @@ describe('client pre-keys', () => {
         // of the client's one-time pre-keys.
         const inbound = buildInboundPreKeyMessage(transport)
         let received: { text?: string } | null = null
-        client.on(WaClient.MESSAGE, (event: { text?: string }) => {
+        client.on(LavaClient.MESSAGE, (event: { text?: string }) => {
             received = event
         })
         transport.push(inbound)
@@ -787,7 +818,7 @@ describe('client pre-keys', () => {
 
 describe('client messaging', () => {
     /** Connects a client and marks it as paired. */
-    async function pairedClient(): Promise<{ client: WaClient; transport: MockTransport }> {
+    async function pairedClient(): Promise<{ client: LavaClient; transport: MockTransport }> {
         const pair = makeClient()
         await pair.client.connect()
         pair.transport.push({
@@ -882,7 +913,7 @@ describe('client messaging', () => {
         const inbound = buildInboundMessage(transport)
 
         let received: { text?: string; jid?: string } | null = null
-        client.on(WaClient.MESSAGE, (event: { text?: string; jid?: string }) => {
+        client.on(LavaClient.MESSAGE, (event: { text?: string; jid?: string }) => {
             received = event
         })
         transport.push(inbound)
@@ -982,7 +1013,7 @@ describe('client media', () => {
     }
 
     /** Builds a paired client whose media goes to the fake CDN. */
-    async function mediaClient(): Promise<{ client: WaClient; transport: MockTransport }> {
+    async function mediaClient(): Promise<{ client: LavaClient; transport: MockTransport }> {
         const pair = makeClient('mobile', { mediaHttp: cdn })
         await pair.client.connect()
         pair.transport.push({
@@ -1098,6 +1129,100 @@ describe('client media', () => {
             () => client.media.download({ conversation: 'just text' }),
             /no downloadable media/,
         )
+    })
+})
+
+describe('client app state', () => {
+    /** Builds a paired client whose app state can be synchronised. */
+    async function appStateClient(): Promise<{ client: LavaClient; transport: MockTransport }> {
+        const pair = makeClient('mobile')
+        await pair.client.connect()
+        pair.transport.push({
+            tag: 'success',
+            attrs: {},
+            content: [{ tag: 'props', attrs: { jid: ME_JID } }],
+        })
+        await waitFor(() => pair.client.getState() === 'connected')
+        return pair
+    }
+
+    it('syncs the collections of the account', async () => {
+        const { client, transport } = await appStateClient()
+        transport.appStateSyncs.length = 0
+
+        const result = await client.appState.sync({ collections: ['regular'] })
+        assert.equal(result.collections.length, 1)
+        assert.equal(result.collections[0]!.collection, 'regular')
+        assert.equal(result.collections[0]!.state, 'success')
+
+        // The IQ carried the app-state namespace.
+        const iq = transport.appStateSyncs[0]!
+        assert.equal(iq.attrs.xmlns, 'w:sync:app:state')
+        assert.equal(iq.attrs.type, 'set')
+        const sync = (iq.content as BinaryNode[])[0]!
+        assert.equal(sync.tag, 'sync')
+        assert.equal(sync.attrs.data_namespace, '3')
+        const collections = sync.content as BinaryNode[]
+        assert.equal(collections.length, 1)
+        assert.equal(collections[0]!.attrs.name, 'regular')
+    })
+
+    it('generates a sync key and keeps it', async () => {
+        const { client } = await appStateClient()
+        await client.appState.sync({ collections: ['regular'] })
+
+        const keys = client.appState.keys()
+        assert.equal(keys.length, 1)
+        assert.equal(keys[0]!.keyId.length, 12)
+        assert.equal(keys[0]!.keyData.length, 64)
+    })
+
+    it('keeps the sync key across a restart', async () => {
+        const store = new MemoryCredentialStore()
+        const first = makeClient('mobile', { credentials: store })
+        await first.client.connect()
+        first.transport.push({
+            tag: 'success',
+            attrs: {},
+            content: [{ tag: 'props', attrs: { jid: ME_JID } }],
+        })
+        await waitFor(() => first.client.getState() === 'connected')
+        await first.client.appState.sync({ collections: ['regular'] })
+        const keyId = first.client.appState.keys()[0]!.keyId
+
+        // The second client reads the same credential file.
+        const second = makeClient('mobile', { credentials: store })
+        await second.client.connect()
+        second.transport.push({
+            tag: 'success',
+            attrs: {},
+            content: [{ tag: 'props', attrs: { jid: ME_JID } }],
+        })
+        await waitFor(() => second.client.getState() === 'connected')
+        assert.equal(second.client.appState.keys()[0]!.keyId, keyId)
+    })
+
+    it('pushes a queued change into the next round', async () => {
+        const { client, transport } = await appStateClient()
+        transport.appStateSyncs.length = 0
+
+        client.appState.set('regular', 'the-index', { pushNameSetting: { name: 'Lava' } })
+        await client.appState.sync({ collections: ['regular'] })
+
+        const iq = transport.appStateSyncs[0]!
+        const sync = (iq.content as BinaryNode[])[0]!
+        const collection = (sync.content as BinaryNode[])[0]!
+        const patch = (collection.content as BinaryNode[])[0]!
+        assert.equal(patch.tag, 'patch')
+        assert.ok(patch.content instanceof Uint8Array)
+    })
+
+    it('reports the state of a collection', async () => {
+        const { client } = await appStateClient()
+        await client.appState.sync({ collections: ['regular'] })
+        const state = client.appState.state('regular')
+        assert.equal(typeof state.version, 'number')
+        assert.equal(typeof state.hash, 'string')
     })
 })
 

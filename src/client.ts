@@ -1,13 +1,13 @@
 /**
  * The WhatsApp client.
  *
- * {@link WaClient} owns everything: the credentials, the Signal key material,
+ * {@link LavaClient} owns everything: the credentials, the Signal key material,
  * the transport and the node router. It exposes small, focused sub-APIs
  * (`client.message`, `client.group`, `client.call`, …) and emits events for
  * everything that happens asynchronously.
  *
  * ```ts
- * const client = new WaClient({ transport: 'mobile' })
+ * const client = new LavaClient({ transport: 'mobile' })
  * client.on('message', (m) => console.log(m.text))
  * await client.connect()
  * await client.message.send('6281234567890@s.whatsapp.net', 'Hello')
@@ -24,8 +24,24 @@ import {
     type CredentialSnapshot,
     type CredentialStore,
 } from './auth/credentials.js'
+import {
+    LavaRegistration,
+    type LavaCodeRequest,
+    type LavaNumberStatus,
+    type LavaRegistrationOptions,
+    type LavaRegistrationResult,
+    type LavaRegistrationSession,
+} from './auth/registration.js'
 import { completeCompanionFinish, createCompanionHello } from './auth/pairing.js'
-import { generateX25519KeyPair, toSerializedPublicKey } from './crypto/primitives.js'
+import {
+    AppStateSyncClient,
+    type AppStateExternalBlob,
+    type AppStatePendingMutation,
+    type AppStateSyncOptions,
+    type AppStateSyncResult,
+} from './appstate/sync.js'
+import { AppStateStore, type AppStateStoreSnapshot } from './appstate/store.js'
+import { toHex, generateX25519KeyPair, toSerializedPublicKey } from './crypto/primitives.js'
 import { createSilentLogger, type WaLogger } from './logger.js'
 import {
     collectInboundEncryptions,
@@ -38,6 +54,7 @@ import {
     type InboundMessageKey,
 } from './message/codec.js'
 import {
+    PROTOCOL_MESSAGE_TYPE,
     buildTextContent,
     buildReactionContent,
     buildRevokeContent,
@@ -190,7 +207,7 @@ export type WaConnectionState =
  * The two built-in transports — the native mobile (WAP) one and the
  * WhatsApp Web one — both implement it, and a custom transport (a proxy, a
  * tunnelled socket, a test double) can be plugged in through
- * {@link WaClientOptions.transportFactory}.
+ * {@link LavaClientOptions.transportFactory}.
  */
 export interface WaTransport {
     /** Starts the transport and performs the Noise handshake. */
@@ -217,8 +234,8 @@ export type WaTransportFactory = (context: {
     handlers: TransportHandlers
 }) => WaTransport
 
-/** Configuration for {@link WaClient}. */
-export interface WaClientOptions {
+/** Configuration for {@link LavaClient}. */
+export interface LavaClientOptions {
     /** The transport to use; `mobile` (the native WAP API) by default. */
     transport?: WaTransportMode
     /** Where the session is persisted; an in-memory store by default. */
@@ -376,15 +393,19 @@ export interface WaSessionInfo {
  * The WhatsApp client.
  *
  * The client is an {@link EventEmitter}; the events it emits are documented
- * on {@link WaClient}.
+ * on {@link LavaClient}.
  */
-export class WaClient extends EventEmitter {
+export class LavaClient extends EventEmitter {
     /** Emitted with `{ qr, ttlMs }` when a QR code has to be scanned. */
     static readonly AUTH_QR = 'auth_qr'
     /** Emitted with `{ code }` when a pairing code is available. */
     static readonly AUTH_PAIRING_CODE = 'auth_pairing_code'
     /** Emitted with `{ meJid, meLid }` once the device is paired. */
     static readonly AUTH_PAIRED = 'auth_paired'
+    /** Emitted with `{ phoneNumber, method }` when a verification code is sent. */
+    static readonly AUTH_REGISTRATION_CODE = 'auth_registration_code'
+    /** Emitted with `{ meJid }` once a phone number has been claimed. */
+    static readonly AUTH_REGISTERED = 'auth_registered'
     /** Emitted with `{ state }` whenever the connection state changes. */
     static readonly CONNECTION = 'connection'
     /** Emitted with a {@link WaInboundMessage} for every inbound message. */
@@ -398,19 +419,23 @@ export class WaClient extends EventEmitter {
     /** Emitted with an `Error` for every recoverable failure. */
     static readonly ERROR = 'error'
 
-    private readonly options: WaClientOptions
+    private readonly options: LavaClientOptions
     private readonly logger: WaLogger
     private readonly store: CredentialStore
     private readonly keyStore: SignalKeyStore
     private readonly signal: SignalSessionManager
     private readonly deviceList = new DeviceListStore()
     private readonly mediaConn = new MediaConnectionCache()
+    private readonly appStateStore = new AppStateStore()
+    private readonly pendingAppState: AppStatePendingMutation[] = []
 
     private credentials: CredentialSnapshot | null = null
     private transport: WaTransport | null = null
     private state: WaConnectionState = 'disconnected'
     private reconnectTimer: NodeJS.Timeout | null = null
     private stopping = false
+    /** The registration in progress, when a code was asked for. */
+    private registrationSession: LavaRegistrationSession | undefined
 
     /** The tail of the credential write queue. */
     private credentialWrite: Promise<void> = Promise.resolve()
@@ -433,7 +458,7 @@ export class WaClient extends EventEmitter {
     /**
      * @param options The client options.
      */
-    constructor(options: WaClientOptions = {}) {
+    constructor(options: LavaClientOptions = {}) {
         super()
         this.options = options
         this.logger = options.logger ?? createSilentLogger()
@@ -460,7 +485,7 @@ export class WaClient extends EventEmitter {
         if (!snapshot.preKeys.some((record) => record.id === id)) return
         void this.persistPreKeyPool().catch((error: unknown) => {
             this.emit(
-                WaClient.ERROR,
+                LavaClient.ERROR,
                 error instanceof Error ? error : new Error(String(error)),
             )
         })
@@ -501,7 +526,7 @@ export class WaClient extends EventEmitter {
      *
      * The call resolves as soon as the Noise handshake succeeded and the
      * client payload was accepted; pairing continues in the background and
-     * completes through the {@link WaClient.AUTH_PAIRED} event.
+     * completes through the {@link LavaClient.AUTH_PAIRED} event.
      */
     async connect(): Promise<void> {
         if (this.state === 'connected' || this.state === 'connecting') return
@@ -551,7 +576,7 @@ export class WaClient extends EventEmitter {
     private setState(state: WaConnectionState): void {
         if (this.state === state) return
         this.state = state
-        this.emit(WaClient.CONNECTION, { state })
+        this.emit(LavaClient.CONNECTION, { state })
     }
 
     /**
@@ -566,8 +591,31 @@ export class WaClient extends EventEmitter {
         try {
             await this.uploadPreKeys()
         } catch (error) {
-            this.emit(WaClient.ERROR, error)
+            this.emit(LavaClient.ERROR, error)
         }
+        // The app state of the account is synchronised in the background:
+        // a device that never syncs looks different from the official ones.
+        void this.appState
+            .sync()
+            .catch((error: unknown) => {
+                this.warn('app-state: the initial sync failed', error)
+            })
+    }
+
+    /**
+     * Reports a problem that does not stop the client.
+     *
+     * @param message The message.
+     * @param error The cause.
+     */
+    private warn(message: string, error?: unknown): void {
+        this.logger.log({
+            level: 'warn',
+            message,
+            ...(error !== undefined
+                ? { fields: { error: error instanceof Error ? error.message : String(error) } }
+                : {}),
+        })
     }
 
     /**
@@ -598,7 +646,7 @@ export class WaClient extends EventEmitter {
                 this.handleClose(error)
             },
             onError: (error: Error) => {
-                this.emit(WaClient.ERROR, error)
+                this.emit(LavaClient.ERROR, error)
             },
         }
 
@@ -630,7 +678,7 @@ export class WaClient extends EventEmitter {
      * @param credentials The credentials.
      */
     private buildNoisePayload(credentials: CredentialSnapshot): Uint8Array {
-        const profile = this.options.deviceProfile ?? DEFAULT_ANDROID_PROFILE
+        const profile = this.resolveDeviceProfile(credentials.deviceInfo)
         const mode = this.options.transport ?? 'mobile'
         const registration = this.keyStore.getRegistrationInfo()
         const signedPreKey = this.keyStore.getSignedPreKey()
@@ -684,6 +732,39 @@ export class WaClient extends EventEmitter {
     }
 
     /**
+     * Resolves the device profile the handshake announces.
+     *
+     * A device keeps the same fingerprint for its whole life: the app
+     * version, the model and the build number are written into the account
+     * when the device is registered, and the server compares the login
+     * payload against them. A device that suddenly announces another model
+     * looks like a new device that took over an old one.
+     *
+     * So the profile stored with the session wins over the default, and only
+     * an explicitly configured profile overrides the stored one.
+     *
+     * @param stored The stored device profile, when the session has one.
+     */
+    private resolveDeviceProfile(
+        stored?: CredentialSnapshot['deviceInfo'],
+    ): DeviceProfile {
+        if (this.options.deviceProfile) return this.options.deviceProfile
+        if (!stored) return DEFAULT_ANDROID_PROFILE
+        return {
+            ...DEFAULT_ANDROID_PROFILE,
+            os: stored.os ?? 'android',
+            appVersion: stored.appVersion ?? DEFAULT_ANDROID_PROFILE.appVersion,
+            device: stored.device ?? DEFAULT_ANDROID_PROFILE.device,
+            osVersion: stored.osVersion ?? DEFAULT_ANDROID_PROFILE.osVersion,
+            osBuildNumber: stored.osBuildNumber ?? DEFAULT_ANDROID_PROFILE.osBuildNumber,
+            manufacturer: stored.manufacturer ?? DEFAULT_ANDROID_PROFILE.manufacturer,
+            ...(stored.deviceBoard !== undefined ? { deviceBoard: stored.deviceBoard } : {}),
+            ...(stored.mcc !== undefined ? { mcc: stored.mcc } : {}),
+            ...(stored.mnc !== undefined ? { mnc: stored.mnc } : {}),
+        }
+    }
+
+    /**
      * Loads the credentials, creating them when they are missing.
      */
     private async ensureCredentials(): Promise<CredentialSnapshot> {
@@ -693,6 +774,8 @@ export class WaClient extends EventEmitter {
             this.restoreSignalKeys(existing)
             return existing
         }
+
+        const profile = this.resolveDeviceProfile()
 
         const noiseKeyPair = generateX25519KeyPair()
         const registration = generateRegistrationInfo()
@@ -739,10 +822,37 @@ export class WaClient extends EventEmitter {
             nextSignedPreKeyId: this.keyStore.getNextSignedPreKeyId(),
             serverHasPreKeys: this.keyStore.getServerHasPreKeys(),
             transport: this.options.transport ?? 'mobile',
+            ...(this.options.transport === 'web'
+                ? {}
+                : { deviceInfo: this.deviceInfoFromProfile(profile) }),
         }
         await this.store.save(snapshot)
         this.credentials = snapshot
         return snapshot
+    }
+
+    /**
+     * Extracts the persistent part of a device profile.
+     *
+     * The fingerprint of a device has to survive a restart, so it is written
+     * into the credential snapshot and read back when the session resumes.
+     *
+     * @param profile The device profile.
+     */
+    private deviceInfoFromProfile(profile: DeviceProfile): NonNullable<
+        CredentialSnapshot['deviceInfo']
+    > {
+        return {
+            appVersion: profile.appVersion ?? DEFAULT_ANDROID_PROFILE.appVersion ?? '',
+            device: profile.device,
+            osVersion: profile.osVersion,
+            osBuildNumber: profile.osBuildNumber,
+            manufacturer: profile.manufacturer,
+            os: profile.os,
+            ...(profile.deviceBoard !== undefined ? { deviceBoard: profile.deviceBoard } : {}),
+            ...(profile.mcc !== undefined ? { mcc: profile.mcc } : {}),
+            ...(profile.mnc !== undefined ? { mnc: profile.mnc } : {}),
+        }
     }
 
     /**
@@ -798,6 +908,11 @@ export class WaClient extends EventEmitter {
         // While the server holds a batch of our pre-keys there is no need to
         // upload another one.
         this.keyStore.setServerHasPreKeys(snapshot.serverHasPreKeys === true)
+        // The app-state store is restored as well, so the client keeps the
+        // collection state it had before the restart.
+        if (snapshot.appState) {
+            this.appStateStore.mergeSnapshot(snapshot.appState)
+        }
     }
 
     /**
@@ -920,7 +1035,7 @@ export class WaClient extends EventEmitter {
         }).then(() => {
             this.setState('connected')
             if (meJid) {
-                this.emit(WaClient.AUTH_PAIRED, { meJid, meLid })
+                this.emit(LavaClient.AUTH_PAIRED, { meJid, meLid })
             }
             void this.afterConnect()
         })
@@ -987,7 +1102,7 @@ export class WaClient extends EventEmitter {
         try {
             await this.uploadPreKeys()
         } catch (error) {
-            this.emit(WaClient.ERROR, error)
+            this.emit(LavaClient.ERROR, error)
         }
     }
 
@@ -1001,7 +1116,7 @@ export class WaClient extends EventEmitter {
         try {
             await this.validateDigestAndRecoverPreKeys()
         } catch (error) {
-            this.emit(WaClient.ERROR, error)
+            this.emit(LavaClient.ERROR, error)
         }
     }
 
@@ -1024,7 +1139,7 @@ export class WaClient extends EventEmitter {
         try {
             response = await this.query(buildDigestIq())
         } catch (error) {
-            this.emit(WaClient.ERROR, error)
+            this.emit(LavaClient.ERROR, error)
             return {
                 valid: false,
                 reason: 'missing_remote_digest',
@@ -1057,7 +1172,7 @@ export class WaClient extends EventEmitter {
         try {
             digest = parseDigestResponse(response)
         } catch (error) {
-            this.emit(WaClient.ERROR, error)
+            this.emit(LavaClient.ERROR, error)
             return {
                 valid: false,
                 reason: 'invalid_response',
@@ -1134,7 +1249,7 @@ export class WaClient extends EventEmitter {
         const remaining = this.qrRefs.length - this.qrRefIndex
         const ttlMs =
             remaining >= 5 ? WA_DEFAULTS.QR_INITIAL_TTL_MS : WA_DEFAULTS.QR_ROTATION_TTL_MS
-        this.emit(WaClient.AUTH_QR, {
+        this.emit(LavaClient.AUTH_QR, {
             qr: this.buildQrPayload(ref, credentials),
             ttlMs,
         })
@@ -1247,7 +1362,7 @@ export class WaClient extends EventEmitter {
             loginCounter: 0,
         })
         this.setState('connected')
-        this.emit(WaClient.AUTH_PAIRED, { meJid, meLid })
+        this.emit(LavaClient.AUTH_PAIRED, { meJid, meLid })
         void this.afterConnect()
     }
 
@@ -1279,7 +1394,7 @@ export class WaClient extends EventEmitter {
                     const body = decodeMessageBody(stripInboundPadding(decrypted.plaintext))
                     await this.emitInboundMessage(node, sender, body, meJid)
                 } catch (error) {
-                    this.emit(WaClient.ERROR, error)
+                    this.emit(LavaClient.ERROR, error)
                 }
                 continue
             }
@@ -1308,7 +1423,7 @@ export class WaClient extends EventEmitter {
             }
 
             if (!decryptedMessage) {
-                if (lastError) this.emit(WaClient.ERROR, lastError)
+                if (lastError) this.emit(LavaClient.ERROR, lastError)
                 continue
             }
 
@@ -1316,7 +1431,7 @@ export class WaClient extends EventEmitter {
                 const body = decodeMessageBody(stripInboundPadding(decryptedMessage.plaintext))
                 await this.emitInboundMessage(node, sender, body, meJid)
             } catch (error) {
-                this.emit(WaClient.ERROR, error)
+                this.emit(LavaClient.ERROR, error)
             }
         }
 
@@ -1378,11 +1493,13 @@ export class WaClient extends EventEmitter {
                     distribution.payload,
                 )
             } catch (error) {
-                this.emit(WaClient.ERROR, error)
+                this.emit(LavaClient.ERROR, error)
             }
             // A distribution-only message carries no user-visible content.
             return
         }
+
+        await this.handleProtocolMessage(body, senderDeviceJid)
 
         const key = resolveInboundMessageKey(node, senderDeviceJid, meJid, this.credentials?.meLid)
         const summary = summarizeMessageBody(body)
@@ -1400,7 +1517,123 @@ export class WaClient extends EventEmitter {
             ...(summary.revoked !== undefined ? { revoked: summary.revoked } : {}),
             ...(node.attrs.t ? { timestamp: Number.parseInt(node.attrs.t, 10) } : {}),
         }
-        this.emit(WaClient.MESSAGE, event)
+        this.emit(LavaClient.MESSAGE, event)
+    }
+
+    /**
+     * Handles a protocol message that is not user visible.
+     *
+     * The app-state key share and the key request are the two the library
+     * acts on: they move the sync keys between the devices of an account.
+     *
+     * @param body The message body.
+     * @param senderDeviceJid The device the message came from.
+     */
+    private async handleProtocolMessage(
+        body: MessageContent,
+        senderDeviceJid: string,
+    ): Promise<void> {
+        const protocol = body.protocolMessage as Record<string, unknown> | undefined
+        if (!protocol) return
+
+        const share = protocol.appStateSyncKeyShare as Record<string, unknown> | undefined
+        if (share) {
+            const imported = this.importAppStateKeys(share)
+            if (imported > 0) {
+                // The peer may have sent a key the client was missing, so a
+                // sync round can now make progress.
+                void this.appState
+                    .sync()
+                    .catch((error: unknown) => {
+                        this.emit(
+                            LavaClient.ERROR,
+                            error instanceof Error ? error : new Error(String(error)),
+                        )
+                    })
+            }
+            return
+        }
+
+        const request = protocol.appStateSyncKeyRequest as Record<string, unknown> | undefined
+        if (request) {
+            await this.answerAppStateKeyRequest(request, senderDeviceJid)
+        }
+    }
+
+    /**
+     * Imports the sync keys of a key share.
+     *
+     * @param share The key share.
+     * @returns The number of keys that were new.
+     */
+    private importAppStateKeys(share: Record<string, unknown>): number {
+        const keys = share.keys
+        if (!Array.isArray(keys)) return 0
+        const imported: {
+            keyId: Uint8Array
+            keyData: Uint8Array
+            timestamp: number
+        }[] = []
+        for (const item of keys) {
+            const record = item as Record<string, unknown>
+            const keyId = (record.keyId as Record<string, unknown> | undefined)?.keyId
+            const keyData = (record.keyData as Record<string, unknown> | undefined)?.keyData
+            if (!(keyId instanceof Uint8Array)) continue
+            if (!(keyData instanceof Uint8Array)) continue
+            const timestamp = (record.keyData as Record<string, unknown> | undefined)?.timestamp
+            imported.push({
+                keyId,
+                keyData,
+                timestamp: typeof timestamp === 'number' ? timestamp : Date.now(),
+            })
+        }
+        if (imported.length === 0) return 0
+        const added = this.appStateStore.upsertKeys(imported)
+        if (added > 0) {
+            void this.persistAppState().catch(() => undefined)
+        }
+        return added
+    }
+
+    /**
+     * Answers a request for sync keys.
+     *
+     * @param request The request.
+     * @param senderDeviceJid The device that asked.
+     */
+    private async answerAppStateKeyRequest(
+        request: Record<string, unknown>,
+        senderDeviceJid: string,
+    ): Promise<void> {
+        const entries = request.keyIds
+        if (!Array.isArray(entries)) return
+        const wanted = new Set<string>()
+        for (const entry of entries) {
+            const keyId = (entry as Record<string, unknown> | undefined)?.keyId
+            if (keyId instanceof Uint8Array) wanted.add(toHex(keyId))
+        }
+        if (wanted.size === 0) return
+        const keys = this.appStateStore
+            .listKeys()
+            .filter((key) => wanted.has(toHex(key.keyId)))
+            .map((key) => ({
+                keyId: { keyId: key.keyId },
+                keyData: { keyData: key.keyData, timestamp: key.timestamp },
+            }))
+        if (keys.length === 0) return
+        try {
+            await this.sendBody(senderDeviceJid, {
+                protocolMessage: {
+                    type: PROTOCOL_MESSAGE_TYPE.APP_STATE_SYNC_KEY_SHARE,
+                    appStateSyncKeyShare: { keys },
+                },
+            })
+        } catch (error) {
+            this.emit(
+                LavaClient.ERROR,
+                error instanceof Error ? error : new Error(String(error)),
+            )
+        }
     }
 
     /**
@@ -1415,7 +1648,7 @@ export class WaClient extends EventEmitter {
             type: node.attrs.type ?? '',
             ...(node.attrs.participant ? { participant: node.attrs.participant } : {}),
         }
-        this.emit(WaClient.RECEIPT, event)
+        this.emit(LavaClient.RECEIPT, event)
     }
 
     /**
@@ -1430,7 +1663,7 @@ export class WaClient extends EventEmitter {
             ...(node.attrs.error ? { error: node.attrs.error } : {}),
             ...(node.attrs.type ? { type: node.attrs.type } : {}),
         }
-        this.emit(WaClient.MESSAGE_ACK, event)
+        this.emit(LavaClient.MESSAGE_ACK, event)
     }
 
     /**
@@ -1448,7 +1681,7 @@ export class WaClient extends EventEmitter {
             this.reconnectTimer = null
             void this.connect().catch((reconnectError: unknown) => {
                 this.emit(
-                    WaClient.ERROR,
+                    LavaClient.ERROR,
                     reconnectError instanceof Error ? reconnectError : new Error(String(reconnectError)),
                 )
             })
@@ -1532,7 +1765,7 @@ export class WaClient extends EventEmitter {
                 companionEphemeralPublicKey: hello.companionEphemeralPublicKey,
                 finished: false,
             }
-            this.emit(WaClient.AUTH_PAIRING_CODE, { code: hello.pairingCode })
+            this.emit(LavaClient.AUTH_PAIRING_CODE, { code: hello.pairingCode })
             return hello.pairingCode
         },
 
@@ -1561,6 +1794,158 @@ export class WaClient extends EventEmitter {
             this.credentials = null
             this.setState('disconnected')
         },
+    }
+
+    /**
+     * The phone-number registration API.
+     *
+     * Registering a number is the *mobile primary* way into an account: the
+     * library claims the number itself instead of attaching to somebody
+     * else's phone as a companion. The server verifies the number out of band
+     * — by SMS or by a voice call — and the account's whole state is pushed to
+     * the library afterwards.
+     *
+     * ```ts
+     * const client = new LavaClient({ transport: 'mobile' })
+     * await client.registration.requestCode('+6281234567890')
+     * await client.registration.confirm('123456')
+     * await client.connect()
+     * ```
+     */
+    readonly registration = {
+        /**
+         * Asks the server for a verification code for a phone number.
+         *
+         * @param phoneNumber The phone number, in international format.
+         * @param options The options.
+         */
+        requestCode: async (
+            phoneNumber: string,
+            options: LavaRegistrationOptions = {},
+        ): Promise<LavaCodeRequest> => {
+            const session = await this.createRegistrationSession(phoneNumber, options)
+            const status = await LavaRegistration.checkNumber(session, options)
+            if (status.registered) {
+                throw new Error(
+                    'lava: the number is already an account — ' +
+                        'pair as a companion device instead of registering it',
+                )
+            }
+            const request = await LavaRegistration.requestCode(
+                session,
+                options.method ?? 'sms',
+                options,
+            )
+            if (!request.ok) {
+                throw new Error(
+                    `lava: the server refused to send a code${request.reason ? `: ${request.reason}` : ''}`,
+                )
+            }
+            this.registrationSession = session
+            this.emit(LavaClient.AUTH_REGISTRATION_CODE, {
+                phoneNumber: session.phoneNumber,
+                method: request.method,
+            })
+            return request
+        },
+
+        /**
+         * Hands the verification code back and claims the number.
+         *
+         * @param code The code the user received.
+         * @param options The options.
+         */
+        confirm: async (
+            code: string,
+            options: LavaRegistrationOptions = {},
+        ): Promise<LavaRegistrationResult> => {
+            const session = this.registrationSession
+            if (!session) {
+                throw new Error('lava: no code was requested for this session')
+            }
+            const result = await LavaRegistration.submitCode(session, code, options)
+            if (!result.ok) {
+                throw new Error(
+                    `lava: the server refused the code${result.reason ? `: ${result.reason}` : ''}`,
+                )
+            }
+            const canonical = result.canonicalNumber ?? session.nationalNumber
+            await this.updateCredentials({
+                meJid: `${canonical}@s.whatsapp.net`,
+                transport: 'mobile',
+            })
+            this.registrationSession = undefined
+            this.emit(LavaClient.AUTH_REGISTERED, {
+                meJid: `${canonical}@s.whatsapp.net`,
+            })
+            return result
+        },
+
+        /**
+         * Asks the server whether a number is already an account.
+         *
+         * @param phoneNumber The phone number, in international format.
+         * @param options The options.
+         */
+        status: async (
+            phoneNumber: string,
+            options: LavaRegistrationOptions = {},
+        ): Promise<LavaNumberStatus> => {
+            const session = await this.createRegistrationSession(phoneNumber, options)
+            return LavaRegistration.checkNumber(session, options)
+        },
+    }
+
+    /**
+     * Builds the registration session of a phone number.
+     *
+     * The identity material comes from the same key store the connection
+     * uses, so the number is claimed by exactly the device that later logs
+     * in with it.
+     *
+     * @param phoneNumber The phone number, in international format.
+     * @param options The options.
+     */
+    private async createRegistrationSession(
+        phoneNumber: string,
+        options: LavaRegistrationOptions,
+    ): Promise<LavaRegistrationSession> {
+        const credentials = this.credentials ?? (await this.ensureCredentials())
+        const registration = this.keyStore.getRegistrationInfo()
+        const signedPreKey = this.keyStore.getSignedPreKey()
+        if (!registration || !signedPreKey) {
+            throw new Error('lava: the device has no Signal identity to register with')
+        }
+        const profile = this.options.deviceProfile ?? DEFAULT_ANDROID_PROFILE
+        return LavaRegistration.createSession(
+            phoneNumber,
+            {
+                noiseKeyPair: credentials.noiseKeyPair,
+                identityKeyPair: credentials.identityKeyPair,
+                registrationId: registration.registrationId,
+                signedPreKey: {
+                    id: signedPreKey.keyId,
+                    keyPair: {
+                        pub: toBase64(signedPreKey.keyPair.pubKey),
+                        priv: toBase64(signedPreKey.keyPair.privKey),
+                    },
+                    signature: toBase64(signedPreKey.signature),
+                },
+            },
+            {
+                ...options,
+                appVersion: options.appVersion ?? profile.appVersion,
+                device: {
+                    os: options.device?.os ?? 'android',
+                    model: options.device?.model ?? profile.device,
+                    osVersion: options.device?.osVersion ?? profile.osVersion,
+                    osBuildNumber: options.device?.osBuildNumber ?? profile.osBuildNumber,
+                    manufacturer: options.device?.manufacturer ?? profile.manufacturer,
+                    appVersion: options.appVersion ?? profile.appVersion ?? '',
+                    ...(options.device?.ram !== undefined ? { ram: options.device.ram } : {}),
+                },
+            },
+        )
     }
 
     /**
@@ -1615,6 +2000,241 @@ export class WaClient extends EventEmitter {
                 payload,
             )
         },
+    }
+
+    /** The app-state API. */
+    readonly appState = {
+        /**
+         * Runs a sync round.
+         *
+         * The server answers with the state of every requested collection:
+         * either a snapshot (the whole collection) or the patches that
+         * happened since the version the device already had.
+         *
+         * @param options The options.
+         */
+        sync: async (options: AppStateSyncOptions = {}): Promise<AppStateSyncResult> => {
+            const client = this.appStateClient()
+            const pending = this.pendingAppState.splice(0, this.pendingAppState.length)
+            const result = await client.sync({
+                ...options,
+                pendingMutations: [...(options.pendingMutations ?? []), ...pending],
+            })
+            // The changes of a collection that the server did not accept
+            // stay pending, so the next round pushes them again.
+            const accepted = new Set(
+                result.collections
+                    .filter((entry) => entry.uploaded)
+                    .map((entry) => entry.collection),
+            )
+            for (const mutation of pending) {
+                if (!accepted.has(mutation.collection)) {
+                    this.pendingAppState.push(mutation)
+                }
+            }
+            await this.persistAppState()
+            return result
+        },
+
+        /**
+         * Records a change that the next sync round pushes to the server.
+         *
+         * @param collection The collection.
+         * @param index The index of the record.
+         * @param value The value of the record.
+         */
+        set: (
+            collection: string,
+            index: string,
+            value: Record<string, unknown>,
+            version = 1,
+        ): void => {
+            this.pendingAppState.push({ collection, operation: 'set', index, value, version })
+        },
+
+        /**
+         * Records the removal of a record, which the next sync round pushes
+         * to the server.
+         *
+         * @param collection The collection.
+         * @param index The index of the record.
+         */
+        remove: (collection: string, index: string, version = 1): void => {
+            this.pendingAppState.push({ collection, operation: 'remove', index, version })
+        },
+
+        /**
+         * Lists the sync keys the device knows about.
+         */
+        keys: () =>
+            this.appStateStore.listKeys().map((key) => ({
+                keyId: toHex(key.keyId),
+                keyData: toHex(key.keyData),
+                timestamp: key.timestamp,
+            })),
+
+        /**
+         * Returns the state of a collection.
+         *
+         * @param collection The collection.
+         */
+        state: (collection: string) => {
+            const state = this.appStateStore.getCollectionState(collection)
+            return {
+                initialized: state.initialized,
+                version: state.version,
+                hash: toHex(state.hash),
+                records: state.indexValueMap.size,
+            }
+        },
+
+        /**
+         * Shares the sync keys with another device of the account.
+         *
+         * @param to The device to share with.
+         * @param keyIds The ids of the keys to share; every known key by
+         *   default.
+         */
+        share: async (to: string, keyIds?: readonly Uint8Array[]): Promise<string> => {
+            const wanted = keyIds
+                ? keyIds.map((id) => toHex(id))
+                : this.appStateStore.listKeys().map((key) => toHex(key.keyId))
+            const keys = this.appStateStore
+                .listKeys()
+                .filter((key) => wanted.includes(toHex(key.keyId)))
+                .map((key) => ({
+                    keyId: { keyId: key.keyId },
+                    keyData: {
+                        keyData: key.keyData,
+                        timestamp: key.timestamp,
+                    },
+                }))
+            return this.sendBody(to, {
+                protocolMessage: {
+                    type: PROTOCOL_MESSAGE_TYPE.APP_STATE_SYNC_KEY_SHARE,
+                    appStateSyncKeyShare: { keys },
+                },
+            })
+        },
+
+        /**
+         * Asks another device of the account for sync keys.
+         *
+         * @param to The device to ask.
+         * @param keyIds The ids of the keys that are missing.
+         */
+        request: async (to: string, keyIds: readonly Uint8Array[]): Promise<string> => {
+            return this.sendBody(to, {
+                protocolMessage: {
+                    type: PROTOCOL_MESSAGE_TYPE.APP_STATE_SYNC_KEY_REQUEST,
+                    appStateSyncKeyRequest: {
+                        keyIds: keyIds.map((keyId) => ({ keyId })),
+                    },
+                },
+            })
+        },
+    }
+
+    /**
+     * Builds the app-state sync client.
+     *
+     * The client is rebuilt whenever the connection changes, because it
+     * holds a reference to the transport.
+     */
+    private appStateClient(): AppStateSyncClient {
+        return new AppStateSyncClient({
+            query: (node, timeoutMs) => this.query(node, timeoutMs),
+            store: this.appStateStore,
+            getMeJid: () => this.credentials?.meJid,
+            mobilePrimary: (this.options.transport ?? 'mobile') === 'mobile',
+            logger: this.logger,
+            onMissingKeys: (keyIds) => this.requestAppStateKeys(keyIds),
+            downloadExternalBlob: async (
+                _collection: string,
+                _kind: 'snapshot' | 'patch',
+                reference: AppStateExternalBlob,
+            ) => {
+                const conn = await this.mediaConn
+                    .get(this.mediaTransferOptions())
+                    .catch(() => null)
+                return downloadMedia(
+                    {
+                        ...this.mediaTransferOptions(),
+                        ...(conn ? { conn } : {}),
+                    },
+                    {
+                        // The official client stores both the snapshot and
+                        // the external patch under the same media type.
+                        mediaType: 'md-app-state',
+                        directPath: reference.directPath,
+                        mediaKey: reference.mediaKey,
+                        ...(reference.fileSha256 ? { fileSha256: reference.fileSha256 } : {}),
+                        ...(reference.fileEncSha256
+                            ? { fileEncSha256: reference.fileEncSha256 }
+                            : {}),
+                    },
+                )
+            },
+        })
+    }
+
+    /**
+     * Asks the other devices of the account for the sync keys that are
+     * missing.
+     *
+     * The devices of an account share their keys with each other, so a
+     * device that joins later can ask for the ones it does not have yet.
+     *
+     * @param keyIds The ids of the keys that are missing.
+     */
+    private async requestAppStateKeys(keyIds: readonly Uint8Array[]): Promise<void> {
+        const devices = this.ownAccountDevices()
+        if (devices.length === 0) return
+        for (const device of devices) {
+            try {
+                await this.appState.request(device, keyIds)
+            } catch (error) {
+                this.warn('app-state: the request for a sync key failed', error)
+            }
+        }
+    }
+
+    /**
+     * Lists the other devices of the account.
+     *
+     * The device index of the paired JID names the device itself, so the
+     * other devices are the ones around it.
+     *
+     * @returns The device JIDs of the account.
+     */
+    private ownAccountDevices(): string[] {
+        const meJid = this.credentials?.meJid
+        if (!meJid) return []
+        const match = /^(.*?):(\d+)@(.*)$/.exec(meJid)
+        if (!match) return []
+        const [, user, device, server] = match
+        const index = Number.parseInt(device!, 10)
+        if (!Number.isSafeInteger(index)) return []
+        const devices: string[] = []
+        // The account holds at most a handful of linked devices; the
+        // official client uses the same window when it looks for a peer.
+        for (let i = 0; i <= 5; i++) {
+            if (i === index) continue
+            devices.push(`${user}:${i}@${server}`)
+        }
+        return devices
+    }
+
+    /**
+     * Persists the app-state store.
+     *
+     * The sync keys and the collection state have to survive a restart, or
+     * the client would ask the server for a fresh snapshot every time.
+     */
+    private async persistAppState(): Promise<void> {
+        await this.updateCredentials(() => ({
+            appState: this.appStateStore.toSnapshot(),
+        }))
     }
 
     /**
@@ -2056,7 +2676,7 @@ export class WaClient extends EventEmitter {
                     ...(options.media ? { media: options.media } : {}),
                 }),
             )
-            this.emit(WaClient.CALL, {
+            this.emit(LavaClient.CALL, {
                 id: callId,
                 jid: to,
                 video: options.video === true,
@@ -2432,7 +3052,7 @@ export class WaClient extends EventEmitter {
         try {
             response = await this.query(buildSignedPreKeyRotateIq(record))
         } catch (error) {
-            this.emit(WaClient.ERROR, error)
+            this.emit(LavaClient.ERROR, error)
         }
 
         if (response && response.attrs.type === WA_IQ_TYPES.RESULT) {
@@ -2467,7 +3087,7 @@ export class WaClient extends EventEmitter {
         if (!this.shouldDigestAfterRotateError(response)) return
         await this.validateDigestAndRecoverPreKeys().catch((error: unknown) => {
             this.emit(
-                WaClient.ERROR,
+                LavaClient.ERROR,
                 error instanceof Error ? error : new Error(String(error)),
             )
         })
@@ -2495,3 +3115,17 @@ export class WaClient extends EventEmitter {
 
 /** Re-exported for convenience. */
 export { FileCredentialStore, MemoryCredentialStore }
+
+/**
+ * The old name of {@link LavaClient}.
+ *
+ * @deprecated Use {@link LavaClient} instead.
+ */
+export { LavaClient as WaClient }
+
+/**
+ * The old name of {@link LavaClientOptions}.
+ *
+ * @deprecated Use {@link LavaClientOptions} instead.
+ */
+export type { LavaClientOptions as WaClientOptions }

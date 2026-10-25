@@ -1,5 +1,5 @@
 /**
- * wa-lite — an ultra-lightweight, zero-dependency WhatsApp client library.
+ * Lava — an ultra-lightweight, zero-dependency WhatsApp library.
  *
  * The library talks to WhatsApp's own protocol directly: the WAP (mobile) API
  * and the WhatsApp Web API, the Signal double ratchet, the Noise handshake
@@ -7,22 +7,24 @@
  * so the only dependency is Node.js itself.
  *
  * ```ts
- * import { WaClient } from 'wa-lite'
+ * import { LavaClient } from 'lava'
  *
- * const client = new WaClient({ transport: 'mobile' })
+ * const client = new LavaClient({ transport: 'mobile' })
  * client.on('message', (m) => console.log(m.jid, m.text))
  * await client.connect()
  * await client.message.send('6281234567890@s.whatsapp.net', 'Hello')
  * ```
  *
- * @module wa-lite
+ * @module lava
  */
 
 // ── Client ──────────────────────────────────────────────────────────────────
 
 export {
+    LavaClient,
     WaClient,
     type WaCallEvent,
+    type LavaClientOptions,
     type WaClientOptions,
     type WaConnectionState,
     type WaInboundMessage,
@@ -59,6 +61,29 @@ export {
     type CredentialStore,
     type StoredKeyPair,
 } from './auth/credentials.js'
+
+// ── Registration (mobile primary) ───────────────────────────────────────────
+
+export {
+    LavaRegistration,
+    buildRegistrationForm,
+    computeRegistrationToken,
+    encryptRegistrationPayload,
+    newRegistrationRequestId,
+    parsePhoneNumber,
+    toBase64Url,
+    toUrlHex,
+    type LavaCodeMethod,
+    type LavaCodeRequest,
+    type LavaCountryMeta,
+    type LavaNumberStatus,
+    type LavaRegistrationDevice,
+    type LavaRegistrationIdentity,
+    type LavaRegistrationOptions,
+    type LavaRegistrationPlatform,
+    type LavaRegistrationResult,
+    type LavaRegistrationSession,
+} from './auth/registration.js'
 
 export {
     CROCKFORD_ALPHABET,
@@ -191,6 +216,58 @@ export {
     type WaMediaHost,
     type WaMediaUpload,
 } from './media/transfer.js'
+
+// ── App state ────────────────────────────────────────────────────────────────
+
+export {
+    APP_STATE_COLLECTIONS,
+    APP_STATE_COLLECTION_STATES,
+    APP_STATE_DEFAULT_COLLECTIONS,
+    APP_STATE_ERROR_CODES,
+    APP_STATE_KEY_TYPES,
+    APP_STATE_KDF_INFO,
+    APP_STATE_LT_HASH_SIZE,
+    APP_STATE_VALUE_MAC_LENGTH,
+} from './appstate/constants.js'
+
+export {
+    AppStateCrypto,
+    type AppStateDecryptedMutation,
+    type AppStateDerivedKeys,
+    type AppStateEncryptedMutation,
+    type AppStateOperation,
+} from './appstate/crypto.js'
+
+export {
+    buildSyncKeyId,
+    generateSyncKey,
+    pickActiveSyncKey,
+    syncKeyDeviceId,
+    syncKeyEpoch,
+    type AppStateSyncKey,
+} from './appstate/keys.js'
+
+export {
+    AppStateStore,
+    emptyCollectionState,
+    type AppStateCollectionState,
+    type AppStateStoreSnapshot,
+} from './appstate/store.js'
+
+export {
+    AppStateMissingKeyError,
+    AppStateSyncClient,
+    parseCollectionState,
+    type AppStateAppliedMutation,
+    type AppStateCollectionPayload,
+    type AppStateCollectionResult,
+    type AppStateExternalBlob,
+    type AppStatePatch,
+    type AppStatePendingMutation,
+    type AppStateSnapshot,
+    type AppStateSyncOptions,
+    type AppStateSyncResult,
+} from './appstate/sync.js'
 
 // ── Messages ────────────────────────────────────────────────────────────────
 
