@@ -92,6 +92,11 @@ await client.group.addParticipants('120363000000000000@g.us', [
     '6281234567890@s.whatsapp.net',
 ])
 await client.group.setSubject('120363000000000000@g.us', 'New subject')
+await client.group.metadata('120363000000000000@g.us')
+await client.group.participants('120363000000000000@g.us')
+client.group.refresh('120363000000000000@g.us')
+client.group.redistributeSenderKey('120363000000000000@g.us')
+console.log(client.group.rotateSenderKey('120363000000000000@g.us'))
 
 // The `client.presence` example of the README.
 client.presence.available('My Name')

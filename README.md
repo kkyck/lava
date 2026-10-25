@@ -68,7 +68,7 @@ await client.message.send('6281234567890@s.whatsapp.net', 'Hello from Lava')
 | App-state sync (chat list, contacts) | ✅ | ⚠️ partial | ✅ |
 | Calls (signalling) | ✅ | ⚠️ partial | ⚠️ partial |
 | Group sender keys | ✅ 5 generations | ✅ 5 generations | ⚠️ 1 generation |
-| Bundle size | **~945 KB** raw JS | ~2.5 MB | ~4 MB |
+| Bundle size | **~980 KB** raw JS | ~2.5 MB | ~4 MB |
 
 **Zero dependencies means zero supply-chain risk.** Everything — the protobuf
 codec, the Signal double ratchet, XEdDSA, the Noise handshake, the QR encoder —
@@ -87,15 +87,21 @@ default rather than an afterthought.
 ## Install
 
 ```bash
-npm install lava
+npm install github:kkyck/lava
 ```
 
 Node.js **22 or newer** is required (`node:crypto`'s X25519 support and
 `node:test`).
 
+> The name `lava` on the npm registry belongs to an unrelated package, so the
+> library is installed straight from the repository. It has **no runtime
+> dependencies** either way — the only thing you need is Node.js 22.
+
 To work on the library itself:
 
 ```bash
+git clone https://github.com/kkyck/lava
+cd lava
 npm install       # dev dependencies only (typescript, @types/node)
 npm run build     # compile to dist/
 npm test          # compile and run the test suite
@@ -437,10 +443,33 @@ const metadata = await client.group.metadata(groupJid)
 const members = await client.group.participants(groupJid)
 
 // The group server refuses a client that asks for the member list of the
-// same group over and over, so the answer is cached. Drop the cache when
-// the membership really changed.
+// same group over and over, so the answer is cached — and it survives a
+// restart, so a fresh process is not refused either. Drop the cache when the
+// membership really changed.
 client.group.refresh(groupJid)
+
+// A member that never got a usable sender key can be repaired without
+// waiting for a re-key: the distribution is sent again with the next message.
+client.group.redistributeSenderKey(groupJid)
+
+// A new generation of the sender key of the group. The replaced generation
+// is kept, so a message that was encrypted with it can still be read.
+const keyId = client.group.rotateSenderKey(groupJid)
 ```
+
+#### Addressing mode
+
+A group either names its members by their phone number or by their *linked
+identity* (LID). The mode is not cosmetic: the sender key of a group belongs
+to the address the group uses, and the `addressing_mode` attribute of the
+stanza tells the server how the addresses in it have to be read — a group
+message that leaves the attribute out, or carries the wrong one, is not
+delivered to the members.
+
+Lava reads the mode from the member list of the group and sends the attribute
+with every group stanza. The member list is read from the group server
+(`w:g2`), and it is cached — the server refuses a client that asks for the
+same group over and over.
 
 ### `client.profile`
 
@@ -553,6 +582,26 @@ asking again, and an endless retry loop would keep the server busy.
 
 Both directions are silent by design — nothing has to be enabled, and no
 event fires for a message that is only re-sent.
+
+### Group messages
+
+A group message travels twice: once as a *pairwise* payload to every device
+that does not know the sender key yet — that is the sender key distribution —
+and once as a *group* payload that every member can read with the sender key.
+
+Lava keeps track of which device knows which generation of the sender key, so
+the distribution is only sent where it is needed. The bookkeeping survives a
+restart.
+
+Two things can go wrong on the way, and both are recoverable:
+
+- A device that never got the distribution cannot read the message and asks
+  for a retry. Lava answers the retry and forgets the distribution of that
+  device, so the next message carries it again.
+- A device that lost the sender key altogether — the member left the group
+  and came back, or the app was reinstalled — can be repaired with
+  `client.group.redistributeSenderKey(groupJid)`, which sends the
+  distribution to every device of the group again.
 
 ### Plugging in your own transport
 
@@ -694,13 +743,13 @@ first, so a long-lived device never piles up key material.
 ```text
 Lava memory benchmark
 ===================================================
-baseline (Node + library)    70.98 MB RSS
-+ 1 Signal session           73.72 MB RSS
-+ full pre-key pool (812)    76.22 MB RSS
+baseline (Node + library)    70.87 MB RSS
++ 1 Signal session           73.73 MB RSS
++ full pre-key pool (812)    76.23 MB RSS
 ===================================================
-session cost      2.74 MB
+session cost      2.86 MB
 pre-key pool cost 2.50 MB (812 pre-keys, 3.2 KB each)
-heap growth       689.0 KB
+heap growth       667.8 KB
 upload batch      812 pre-keys per upload
 ciphertext        152 bytes
 schema            532 messages / 2504 fields
@@ -717,18 +766,18 @@ runs — the numbers above are one representative run.)
 ```text
 Lava size report
 ==============================================
-compiled javascript    968.0 KB
-type declarations       363.3 KB
-typescript sources     1.09 MB
+compiled javascript    980.7 KB
+type declarations       371.3 KB
+typescript sources     1.10 MB
 
 breakdown by module
 ----------------------------------------------
 proto        227.6 KB
-transport    191.1 KB
-signal       140.3 KB
-(root)       125.8 KB
-appstate      64.2 KB
-protocol      59.9 KB
+transport    191.2 KB
+signal       144.7 KB
+(root)       131.5 KB
+appstate      64.9 KB
+protocol      61.8 KB
 crypto        40.6 KB
 auth          38.2 KB
 qr            35.0 KB
@@ -774,7 +823,7 @@ model, no code generation at runtime, one output buffer per message.
 ```bash
 npm run typecheck   # tsc --noEmit
 npm run build       # compile to dist/
-npm test            # 385 tests
+npm test            # 402 tests
 npm run bench       # memory benchmark
 npm run size        # size report
 ```

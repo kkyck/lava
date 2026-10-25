@@ -43,6 +43,14 @@
     "zero-dependency"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kkyck/lava.git"
+  },
+  "homepage": "https://github.com/kkyck/lava#readme",
+  "bugs": {
+    "url": "https://github.com/kkyck/lava/issues"
+  },
   "dependencies": {},
   "devDependencies": {
     "@types/node": "^26.6.5",
