@@ -544,6 +544,8 @@ See [Registering a phone number](#registering-a-phone-number) for the details.
 | `message_ack` | `WaMessageAck` |
 | `receipt` | `WaReceipt` |
 | `call` | `WaCallEvent` |
+| `failure` | `WaFailure` — the server refused the session |
+| `logout` | `WaFailure` — the session is over, the device has to pair again |
 | `error` | `Error` |
 
 ---
@@ -602,6 +604,33 @@ Two things can go wrong on the way, and both are recoverable:
   and came back, or the app was reinstalled — can be repaired with
   `client.group.redistributeSenderKey(groupJid)`, which sends the
   distribution to every device of the group again.
+
+### When the server refuses the session
+
+The server refuses a session with a `<failure/>` stanza and closes the
+socket. Lava reads the stanza and reports it with the `failure` event:
+
+```ts
+client.on(LavaClient.FAILURE, ({ reason, location, logout, disconnect }) => {
+    // reason:    401, 403, 405, 406, 409, 503 …
+    // location:  the server location that reported it
+    // logout:    the credentials are worthless, the device has to pair again
+    // disconnect: the connection may be re-established
+})
+```
+
+The reason decides what happens to the session:
+
+| Reason | Meaning | What Lava does |
+| --- | --- | --- |
+| `401`, `403`, `406` | the session is not authorized, the account is locked or banned | the stored credentials are removed, the `logout` event fires, no reconnect is attempted |
+| `405`, `409`, `503` | the client is too old, the build is unknown, the service is down | the credentials stay, the connection is closed and may be re-established |
+| anything else | unknown | only the `failure` event fires |
+
+A device whose credentials the server refuses has to pair again, so the
+`logout` event is the signal to show a QR code. The credentials are removed
+from the store on the way out — a stale session is worth nothing, and
+keeping it would only make the next connection fail the same way.
 
 ### Plugging in your own transport
 
@@ -823,7 +852,7 @@ model, no code generation at runtime, one output buffer per message.
 ```bash
 npm run typecheck   # tsc --noEmit
 npm run build       # compile to dist/
-npm test            # 404 tests
+npm test            # 416 tests
 npm run bench       # memory benchmark
 npm run size        # size report
 ```

@@ -184,6 +184,14 @@ export {
 } from './protocol/retry.js'
 
 export {
+    parseFailureNode,
+    WA_DISCONNECT_FAILURE_REASONS,
+    WA_FAILURE_REASONS,
+    WA_LOGOUT_FAILURE_REASONS,
+    type WaFailure,
+} from './protocol/failure.js'
+
+export {
     buildAudioContent,
     buildDocumentContent,
     buildImageContent,

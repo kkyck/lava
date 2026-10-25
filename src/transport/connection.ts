@@ -136,7 +136,17 @@ export class Connection {
             const id = node.attrs.id
             if (id && this.iq.settle(id, node)) return
         }
-        this.handlers.onNode?.(node)
+        try {
+            this.handlers.onNode?.(node)
+        } catch (error) {
+            /**
+             * A listener that throws must not swallow the frames that follow
+             * it, and it must not take the host process down either.
+             */
+            this.handlers.onError?.(
+                error instanceof Error ? error : new Error(String(error)),
+            )
+        }
     }
 
     /**
@@ -149,7 +159,14 @@ export class Connection {
      * @param chunk Bytes received from the socket.
      */
     handleData(chunk: Uint8Array): void {
-        this.queue = this.queue.then(() => this.processChunk(chunk))
+        /**
+         * A frame that could not be processed must not stop the frames that
+         * follow it: the chain is restarted after a rejection.
+         */
+        this.queue = this.queue.then(
+            () => this.processChunk(chunk),
+            () => this.processChunk(chunk),
+        )
         this.queue.catch(() => {
             // The rejection is surfaced through `onError`; this handler only
             // exists so the chain never becomes an unhandled rejection.

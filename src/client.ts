@@ -206,6 +206,8 @@ import {
 import type { GroupMetadata, GroupParticipant } from './protocol/group.js'
 import { parseRetryReceipt } from './protocol/retry.js'
 import type { RetryRequest } from './protocol/retry.js'
+import { parseFailureNode } from './protocol/failure.js'
+import type { WaFailure } from './protocol/failure.js'
 import { OutboundMessageCache } from './message/outbound-cache.js'
 
 /** The transport a client runs on. */
@@ -450,6 +452,10 @@ export class LavaClient extends EventEmitter {
     static readonly RECEIPT = 'receipt'
     /** Emitted with a {@link WaCallEvent} for every call transition. */
     static readonly CALL = 'call'
+    /** Emitted with a {@link WaFailure} when the server refuses the session. */
+    static readonly FAILURE = 'failure'
+    /** Emitted when the server ended the session and the device has to pair again. */
+    static readonly LOGOUT = 'logout'
     /** Emitted with an `Error` for every recoverable failure. */
     static readonly ERROR = 'error'
 
@@ -543,6 +549,22 @@ export class LavaClient extends EventEmitter {
         this.logger.log({
             level: 'warn',
             message: `unhandled client error: ${failure.message}`,
+        })
+    }
+
+    /**
+     * Runs a task in the background.
+     *
+     * A promise that nobody waits for ends the process in Node when it is
+     * rejected, so every background task of the library goes through here:
+     * a failure is reported like any other recoverable failure instead of
+     * taking the host application down.
+     *
+     * @param task The task.
+     */
+    private background(task: Promise<unknown>): void {
+        void task.catch((error: unknown) => {
+            this.emitError(error)
         })
     }
 
@@ -1153,7 +1175,7 @@ export class LavaClient extends EventEmitter {
                 this.handleSuccess(node)
                 return
             case WA_MESSAGE_TAGS.MESSAGE:
-                void this.handleMessage(node)
+                this.background(this.handleMessage(node))
                 return
             case WA_MESSAGE_TAGS.RECEIPT:
                 this.handleReceipt(node)
@@ -1162,10 +1184,13 @@ export class LavaClient extends EventEmitter {
                 this.handleAck(node)
                 return
             case WA_NODE_TAGS.IQ:
-                void this.handleIq(node)
+                this.background(this.handleIq(node))
                 return
             case WA_NODE_TAGS.NOTIFICATION:
-                void this.handleNotification(node)
+                this.background(this.handleNotification(node))
+                return
+            case WA_NODE_TAGS.FAILURE:
+                this.handleFailure(node)
                 return
             default:
                 return
@@ -1184,19 +1209,21 @@ export class LavaClient extends EventEmitter {
         const meLid = props?.attrs.lid
         const pushName = props?.attrs.pushname ?? props?.attrs.name
 
-        void this.updateCredentials({
-            ...(meJid ? { meJid } : {}),
-            ...(meLid ? { meLid } : {}),
-            ...(pushName ? { pushName } : {}),
-            lastSuccessTs: Date.now(),
-            loginCounter: (this.credentials?.loginCounter ?? 0) + 1,
-        }).then(() => {
-            this.setState('connected')
-            if (meJid) {
-                this.emit(LavaClient.AUTH_PAIRED, { meJid, meLid })
-            }
-            void this.afterConnect()
-        })
+        this.background(
+            this.updateCredentials({
+                ...(meJid ? { meJid } : {}),
+                ...(meLid ? { meLid } : {}),
+                ...(pushName ? { pushName } : {}),
+                lastSuccessTs: Date.now(),
+                loginCounter: (this.credentials?.loginCounter ?? 0) + 1,
+            }).then(() => {
+                this.setState('connected')
+                if (meJid) {
+                    this.emit(LavaClient.AUTH_PAIRED, { meJid, meLid })
+                }
+                return this.afterConnect()
+            }),
+        )
     }
 
     /**
@@ -1525,7 +1552,7 @@ export class LavaClient extends EventEmitter {
         })
         this.setState('connected')
         this.emit(LavaClient.AUTH_PAIRED, { meJid, meLid })
-        void this.afterConnect()
+        this.background(this.afterConnect())
     }
 
     /**
@@ -1909,6 +1936,15 @@ export class LavaClient extends EventEmitter {
      * @param node The stanza.
      */
     private handleReceipt(node: BinaryNode): void {
+        /**
+         * The protocol work comes first: a listener that throws must not
+         * keep the library from answering a peer.
+         */
+        const request = parseRetryReceipt(node)
+        if (request) {
+            this.background(this.handleRetryRequest(request))
+        }
+
         const event: WaReceipt = {
             id: node.attrs.id ?? '',
             jid: node.attrs.from ?? '',
@@ -1916,11 +1952,6 @@ export class LavaClient extends EventEmitter {
             ...(node.attrs.participant ? { participant: node.attrs.participant } : {}),
         }
         this.emit(LavaClient.RECEIPT, event)
-
-        const request = parseRetryReceipt(node)
-        if (request) {
-            void this.handleRetryRequest(request)
-        }
     }
 
     /**
@@ -2099,6 +2130,71 @@ export class LavaClient extends EventEmitter {
             ...(node.attrs.type ? { type: node.attrs.type } : {}),
         }
         this.emit(LavaClient.MESSAGE_ACK, event)
+    }
+
+    /**
+     * Handles a `<failure/>` stanza.
+     *
+     * The server refuses a session with a `<failure/>` stanza and closes the
+     * socket right after it. The reason decides what happens to the
+     * session: a reason that ends the session for good clears the stored
+     * credentials, because a device whose credentials the server rejects
+     * has to pair again; a reason that only interrupts the connection keeps
+     * them, so the client may connect again.
+     *
+     * @param node The stanza.
+     */
+    private handleFailure(node: BinaryNode): void {
+        const failure = parseFailureNode(node)
+        this.emit(LavaClient.FAILURE, failure)
+        this.logger.log({
+            level: 'warn',
+            message: `the server refused the session (reason ${failure.reason ?? 'unknown'})`,
+            fields: {
+                ...(failure.reason !== undefined ? { reason: failure.reason } : {}),
+                ...(failure.code !== undefined ? { code: failure.code } : {}),
+                ...(failure.location ? { location: failure.location } : {}),
+            },
+        })
+
+        if (failure.logout) {
+            // The credentials are worthless. The device has to pair again,
+            // so the stored ones are removed and no reconnect is attempted.
+            this.stopping = true
+            this.background(this.endSession(failure))
+            return
+        }
+
+        if (failure.disconnect) {
+            // The credentials stay valid: the connection may be re-established.
+            this.transport?.close()
+            return
+        }
+
+        // An unknown reason says nothing about the session. The server
+        // closes the socket anyway, and the close handler takes it from
+        // there.
+    }
+
+    /**
+     * Ends a session the server refused for good.
+     *
+     * The connection is closed, the stored credentials are removed and the
+     * client reports the end of the session with the `logout` event.
+     *
+     * @param failure The failure the server reported.
+     */
+    private async endSession(failure: WaFailure): Promise<void> {
+        this.transport?.close()
+        this.transport = null
+        try {
+            await this.store.clear()
+        } catch (error) {
+            this.emitError(error)
+        }
+        this.credentials = null
+        this.setState('disconnected')
+        this.emit(LavaClient.LOGOUT, failure)
     }
 
     /**

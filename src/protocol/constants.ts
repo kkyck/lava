@@ -14,6 +14,7 @@ export const WA_NODE_TAGS = Object.freeze({
     ACK: 'ack',
     NOTIFICATION: 'notification',
     SUCCESS: 'success',
+    FAILURE: 'failure',
     INFO_BULLETIN: 'ib',
     OFFLINE: 'offline',
     DIRTY: 'dirty',
