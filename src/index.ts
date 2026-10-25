@@ -68,9 +68,13 @@ export {
     LavaRegistration,
     buildRegistrationForm,
     computeRegistrationToken,
+    describeRegistrationFailure,
     encryptRegistrationPayload,
     newRegistrationRequestId,
+    parseCodeAnswer,
+    parseExistAnswer,
     parsePhoneNumber,
+    parseRegisterAnswer,
     toBase64Url,
     toUrlHex,
     type LavaCodeMethod,
@@ -102,6 +106,7 @@ export {
 
 export {
     WA_ADDRESSING_MODES,
+    WA_CALL_CHILD_TAGS,
     WA_CALL_NODE_ATTRS,
     WA_CALL_PAYLOAD_TAGS,
     WA_CHATSTATE_MEDIA,
@@ -190,6 +195,16 @@ export {
     WA_LOGOUT_FAILURE_REASONS,
     type WaFailure,
 } from './protocol/failure.js'
+
+export {
+    WA_CALL_RECEIPT_PAYLOADS,
+    WA_CALL_STATUS,
+    parseCallKey,
+    parseCallNode,
+    type WaCallParticipant,
+    type WaCallPayloadTag,
+    type WaInboundCall,
+} from './protocol/call.js'
 
 export {
     buildAudioContent,

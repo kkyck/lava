@@ -37,6 +37,10 @@ import {
     utf8,
     x25519,
 } from '../crypto/primitives.js'
+import {
+    DEFAULT_IOS_PROFILE,
+    DEFAULT_IOS_VERSION,
+} from '../transport/client-payload.js'
 
 /**
  * The registration server's static X25519 public key.
@@ -159,6 +163,28 @@ export interface LavaRegistrationSession {
     codeMethod?: LavaCodeMethod
 }
 
+/**
+ * The material of a registration that is already in progress.
+ *
+ * The registration is a conversation with the server that spans a
+ * verification code: the code arrives by SMS, which can take minutes, and
+ * the process that asked for it may well be gone by the time it does. The
+ * material therefore has to survive a restart — the server ties the code to
+ * the device that asked for it.
+ */
+export interface LavaRegistrationMaterial {
+    /** The random install id of the device, base64 encoded. */
+    deviceId: string
+    /** The random identity id of the device, base64 encoded. */
+    identityId: string
+    /** The advertising id of the device, a UUID. */
+    advertisingId: string
+    /** The installation folder of the device. */
+    installId: string
+    /** The session id every request of the flow carries. */
+    accessSessionId: string
+}
+
 /** The options of a registration. */
 export interface LavaRegistrationOptions {
     /** The platform the registration speaks for. */
@@ -171,6 +197,13 @@ export interface LavaRegistrationOptions {
     country?: Partial<LavaCountryMeta>
     /** The token the requests are signed with. */
     token?: string
+    /**
+     * The material of an earlier registration of the same device.
+     *
+     * A registration that asks for a second code has to look like the same
+     * device, so the material is carried over from the first request.
+     */
+    material?: LavaRegistrationMaterial
     /** How the verification code is delivered. */
     method?: LavaCodeMethod
     /** How long a request may take, in milliseconds. */
@@ -183,6 +216,16 @@ export interface LavaNumberStatus {
     registered: boolean
     /** Whether the server offers a way to register the number. */
     canRegister: boolean
+    /**
+     * Whether the answer says anything about the number at all.
+     *
+     * The `/exist` endpoint refuses a request it cannot make sense of, and it
+     * refuses it the same way for every number — measured live, a request the
+     * server rejects is answered with `fail` and the reason `incorrect`,
+     * whatever the number is. Such an answer is advisory: the caller has to
+     * fall back to asking for a code and let the server decide there.
+     */
+    conclusive: boolean
     /** The canonical form of the number, when the server named one. */
     canonicalNumber?: string
     /** The reason the server gave, when it named one. */
@@ -195,8 +238,22 @@ export interface LavaNumberStatus {
 export interface LavaCodeRequest {
     /** Whether the server accepted the request. */
     ok: boolean
-    /** The method the code is delivered with. */
+    /**
+     * The method the code is delivered with.
+     *
+     * This is the method the *server* chose, which is not always the one that
+     * was asked for: a number that cannot receive an SMS may be called
+     * instead.
+     */
     method: LavaCodeMethod
+    /** The number of digits the code has. */
+    length?: number
+    /** How long the code takes to arrive, in seconds. */
+    wait?: number
+    /** How long to wait before another code may be asked for, in seconds. */
+    retryAfter?: number
+    /** The canonical form of the number, when the server named one. */
+    canonicalNumber?: string
     /** The reason the server gave, when it refused. */
     reason?: string
     /** The raw answer of the server. */
@@ -215,15 +272,21 @@ export interface LavaRegistrationResult {
     raw: Record<string, unknown>
 }
 
-/** The default device the registration describes. */
+/**
+ * The default device the registration describes.
+ *
+ * It is the very same iPhone the connection announces by default, so that a
+ * number registered through Lava and the session that follows it describe
+ * one and the same phone.
+ */
 const DEFAULT_DEVICE: LavaRegistrationDevice = {
-    os: 'ios',
-    model: 'iPhone',
-    osVersion: '18.5',
-    osBuildNumber: '22F76',
-    manufacturer: 'Apple',
+    os: DEFAULT_IOS_PROFILE.os,
+    model: DEFAULT_IOS_PROFILE.device,
+    osVersion: DEFAULT_IOS_PROFILE.osVersion,
+    osBuildNumber: DEFAULT_IOS_PROFILE.osBuildNumber,
+    manufacturer: DEFAULT_IOS_PROFILE.manufacturer,
     ram: 8,
-    appVersion: '2.26.42.71',
+    appVersion: DEFAULT_IOS_VERSION,
 }
 
 /**
@@ -494,6 +557,20 @@ export function buildRegistrationForm(pairs: readonly (string | null)[]): string
 }
 
 /**
+ * Brings a phone number into the canonical form the server uses.
+ *
+ * The number may be written in any format; the server files the account
+ * under the international form.
+ *
+ * @param phoneNumber The phone number, in any format.
+ * @returns The number in international format.
+ */
+export function canonicalPhoneNumber(phoneNumber: string): string {
+    const { countryCode, nationalNumber } = parsePhoneNumber(phoneNumber)
+    return `+${countryCode}${nationalNumber}`
+}
+
+/**
  * The registration client.
  *
  * The client walks a phone number through the three verification steps and
@@ -531,33 +608,51 @@ export class LavaRegistration {
             }),
             ...(options.country ?? {}),
         }
-        const identityId = randomBytesOf(16)
+        const identityId = options.material
+            ? fromBase64Bytes(options.material.identityId)
+            : randomBytesOf(16)
         return {
-            phoneNumber: `+${countryCode}${nationalNumber}`,
+            phoneNumber: canonicalPhoneNumber(phoneNumber),
             countryCode,
             nationalNumber,
             identity,
-            deviceId: randomBytesOf(16),
+            deviceId: options.material
+                ? fromBase64Bytes(options.material.deviceId)
+                : randomBytesOf(16),
             identityId,
-            advertisingId: toUuid(randomBytesOf(16)),
-            installId: toHex(randomBytesOf(8)),
-            accessSessionId: toBase64Url(randomBytesOf(16)),
+            advertisingId: options.material?.advertisingId ?? toUuid(randomBytesOf(16)),
+            installId: options.material?.installId ?? toHex(randomBytesOf(8)),
+            accessSessionId:
+                options.material?.accessSessionId ?? toBase64Url(randomBytesOf(16)),
             country,
             device,
         }
     }
 
     /**
+     * Extracts the material of a registration, so it can be kept.
+     *
+     * @param session The registration session.
+     * @returns The material the session is built from.
+     */
+    static materialOf(session: LavaRegistrationSession): LavaRegistrationMaterial {
+        return {
+            deviceId: toBase64Url(session.deviceId),
+            identityId: toBase64Url(session.identityId),
+            advertisingId: session.advertisingId,
+            installId: session.installId,
+            accessSessionId: session.accessSessionId,
+        }
+    }
+
+    /**
      * Asks the server whether a number is already an account.
      *
-     * The server answers a request it could not parse with a `fail` status
-     * that names the offending parameter. Such an answer says nothing about
-     * the number, so it is reported as the failure it is instead of being
-     * read as "the number is free".
-     *
-     * A number that is not an account yet can be claimed, and the server
-     * says so by naming the methods it can deliver a verification code
-     * with.
+     * The endpoint is advisory: a request the server refuses comes back with
+     * the same answer for every number, and such an answer is reported as
+     * inconclusive instead of being read as "the number is free". A caller
+     * that needs the truth asks for a code — the `/code` endpoint is the one
+     * that decides.
      *
      * @param session The registration session.
      * @param options The options.
@@ -568,48 +663,15 @@ export class LavaRegistration {
     ): Promise<LavaNumberStatus> {
         const payload = buildCommonPairs(session, options, false)
         const raw = await postRegistration('/exist', session, payload, options)
-        const status = String(raw.status ?? '')
-        const state = typeof raw.state === 'string' ? raw.state : ''
-
-        // A request the server could not parse names the parameter it
-        // choked on. The answer is about the request, not about the number.
-        const param = typeof raw.param === 'string' ? raw.param : ''
-        const failureReason =
-            typeof raw.failure_reason === 'string' ? raw.failure_reason : ''
-        if (param || failureReason) {
-            throw new Error(
-                `lava: the registration server refused the request` +
-                    (param ? ` (parameter "${param}")` : '') +
-                    (failureReason ? `: ${failureReason}` : ''),
-            )
-        }
-
-        // The number of the ways the server can deliver a code: a number
-        // that has none cannot be claimed.
-        const methods =
-            typeof raw.num_visible_dbs_methods === 'number'
-                ? raw.num_visible_dbs_methods
-                : Array.isArray(raw.fallback_methods)
-                  ? raw.fallback_methods.length
-                  : 0
-
-        const registered = state === 'existing' || status === 'ok'
-        const canRegister =
-            state === 'missing' ||
-            raw.can_register === true ||
-            methods > 0 ||
-            status === ''
-        return {
-            registered,
-            canRegister,
-            ...(typeof raw.login === 'string' ? { canonicalNumber: raw.login } : {}),
-            ...(typeof raw.reason === 'string' ? { reason: raw.reason } : {}),
-            raw,
-        }
+        return parseExistAnswer(raw)
     }
 
     /**
      * Asks the server for a verification code.
+     *
+     * The server names the method it will use, the number of digits the code
+     * has and how long the caller has to wait before it may ask for another
+     * one.
      *
      * @param session The registration session.
      * @param method How the code should be delivered.
@@ -629,14 +691,8 @@ export class LavaRegistration {
         const payload = buildCommonPairs(session, options, true)
         payload.push(...buildCodePairs(session, method))
         const raw = await postRegistration('/code', session, payload, options)
-        const status = String(raw.status ?? '')
         session.codeMethod = method
-        return {
-            ok: status === 'ok' || status === 'sent',
-            method,
-            ...(typeof raw.reason === 'string' ? { reason: raw.reason } : {}),
-            raw,
-        }
+        return parseCodeAnswer(raw, method)
     }
 
     /**
@@ -654,13 +710,7 @@ export class LavaRegistration {
         const payload = buildCommonPairs(session, options, session.device.os !== 'android')
         payload.push(...buildRegisterPairs(session, code))
         const raw = await postRegistration('/register', session, payload, options)
-        const status = String(raw.status ?? '')
-        return {
-            ok: status === 'ok' || status === 'sent' || status === 'verified',
-            ...(typeof raw.login === 'string' ? { canonicalNumber: raw.login } : {}),
-            ...(typeof raw.reason === 'string' ? { reason: raw.reason } : {}),
-            raw,
-        }
+        return parseRegisterAnswer(raw)
     }
 }
 
@@ -729,6 +779,218 @@ function buildCommonPairs(
 }
 
 /**
+ * The reason a request was refused, when the server named one.
+ *
+ * The server answers a request it could not make sense of with the
+ * parameter it choked on. That is a bug in the request — not a verdict about
+ * the number — so it is worth an error of its own.
+ */
+interface LavaRequestRefusal {
+    /** The parameter the server named. */
+    param?: string
+    /** The reason the server gave. */
+    reason?: string
+}
+
+/**
+ * Reads the refusal out of an answer of the registration server.
+ *
+ * @param raw The raw answer of the server.
+ */
+function readRefusal(raw: Record<string, unknown>): LavaRequestRefusal | undefined {
+    const param = typeof raw.param === 'string' && raw.param !== '' ? raw.param : undefined
+    const reason =
+        typeof raw.failure_reason === 'string' && raw.failure_reason !== ''
+            ? raw.failure_reason
+            : undefined
+    if (!param && !reason) return undefined
+    return {
+        ...(param !== undefined ? { param } : {}),
+        ...(reason !== undefined ? { reason } : {}),
+    }
+}
+
+/**
+ * Turns a refusal into the error that reports it.
+ *
+ * @param endpoint The endpoint that refused the request.
+ * @param refusal The refusal.
+ */
+function refusalError(endpoint: string, refusal: LavaRequestRefusal): Error {
+    return new Error(
+        `lava: the registration server refused the ${endpoint} request` +
+            (refusal.param ? ` (parameter "${refusal.param}")` : '') +
+            (refusal.reason ? `: ${refusal.reason}` : ''),
+    )
+}
+
+/**
+ * Reads the answer of the `/exist` endpoint.
+ *
+ * The endpoint is the one that tells a free number from an account that
+ * already exists. It is also the one that answers least: a request the
+ * server refuses comes back with the same answer for every number, so the
+ * answer is only worth something when the server actually ruled on the
+ * number. That is what `conclusive` reports.
+ *
+ * @param raw The raw answer of the server.
+ * @returns What the answer says about the number.
+ */
+export function parseExistAnswer(raw: Record<string, unknown>): LavaNumberStatus {
+    const refusal = readRefusal(raw)
+    if (refusal) throw refusalError('exist', refusal)
+
+    const status = String(raw.status ?? '')
+    const state = typeof raw.state === 'string' ? raw.state : ''
+    const reason = typeof raw.reason === 'string' ? raw.reason : ''
+
+    // The number of the ways the server can deliver a code: a number that has
+    // none cannot be claimed.
+    const methods =
+        typeof raw.num_visible_dbs_methods === 'number'
+            ? raw.num_visible_dbs_methods
+            : Array.isArray(raw.fallback_methods)
+              ? raw.fallback_methods.length
+              : 0
+
+    const registered = state === 'existing' || status === 'ok'
+    const missing = state === 'missing'
+    // A server that refuses the request rules on nothing: the answer is then
+    // advisory, and the caller has to ask for a code to learn the truth.
+    const conclusive = registered || missing || status !== 'fail'
+
+    return {
+        registered,
+        // A number that is already an account cannot be claimed again.
+        canRegister:
+            conclusive && !registered && (missing || raw.can_register === true || methods > 0),
+        conclusive,
+        ...(typeof raw.login === 'string' ? { canonicalNumber: raw.login } : {}),
+        ...(reason !== '' ? { reason } : {}),
+        raw,
+    }
+}
+
+/**
+ * Reads the answer of the `/code` endpoint.
+ *
+ * The server names the method it will use, how many digits the code has,
+ * how long the code takes to arrive and how long the caller has to wait
+ * before it may ask for another one.
+ *
+ * @param raw The raw answer of the server.
+ * @param requested The method the caller asked for.
+ * @returns What the server said about the code.
+ */
+export function parseCodeAnswer(
+    raw: Record<string, unknown>,
+    requested: LavaCodeMethod,
+): LavaCodeRequest {
+    const refusal = readRefusal(raw)
+    if (refusal) throw refusalError('code', refusal)
+
+    const status = String(raw.status ?? '')
+    const reason = typeof raw.reason === 'string' ? raw.reason : ''
+    const method = readCodeMethod(raw.method, requested)
+    const length = typeof raw.length === 'number' ? raw.length : undefined
+    const retryAfter = typeof raw.retry_after === 'number' ? raw.retry_after : undefined
+    // The server reports how long it waits per method: `sms_wait` for a
+    // text, `voice_wait` for a call. `send_sms_wait` is the fallback for the
+    // methods it does not name on its own. A wait of minus one means the
+    // server did not say how long it will take.
+    const perMethod = raw[`${method}_wait`]
+    const waitCandidate =
+        typeof perMethod === 'number'
+            ? perMethod
+            : typeof raw.send_sms_wait === 'number'
+              ? raw.send_sms_wait
+              : undefined
+    const wait = waitCandidate !== undefined && waitCandidate >= 0 ? waitCandidate : undefined
+
+    return {
+        ok: status === 'ok' || status === 'sent',
+        method,
+        ...(length !== undefined ? { length } : {}),
+        ...(wait !== undefined ? { wait } : {}),
+        ...(retryAfter !== undefined ? { retryAfter } : {}),
+        ...(typeof raw.login === 'string' ? { canonicalNumber: raw.login } : {}),
+        ...(reason !== '' ? { reason } : {}),
+        raw,
+    }
+}
+
+/**
+ * Reads the method a code is delivered with.
+ *
+ * The server may deliver the code another way than it was asked for, so the
+ * answer wins over the request.
+ *
+ * @param value The method the server named.
+ * @param fallback The method the caller asked for.
+ */
+function readCodeMethod(value: unknown, fallback: LavaCodeMethod): LavaCodeMethod {
+    if (value === 'sms' || value === 'voice' || value === 'flash' || value === 'wa_old') {
+        return value
+    }
+    return fallback
+}
+
+/**
+ * Reads the answer of the `/register` endpoint.
+ *
+ * @param raw The raw answer of the server.
+ * @returns Whether the number was claimed.
+ */
+export function parseRegisterAnswer(raw: Record<string, unknown>): LavaRegistrationResult {
+    const refusal = readRefusal(raw)
+    if (refusal) throw refusalError('register', refusal)
+
+    const status = String(raw.status ?? '')
+    const reason = typeof raw.reason === 'string' ? raw.reason : ''
+    return {
+        ok: status === 'ok' || status === 'verified',
+        ...(typeof raw.login === 'string' ? { canonicalNumber: raw.login } : {}),
+        ...(reason !== '' ? { reason } : {}),
+        raw,
+    }
+}
+
+/**
+ * Describes why the server refused a verification code.
+ *
+ * The reasons the server uses are terse; this turns them into a sentence a
+ * caller can show to a person.
+ *
+ * @param reason The reason the server gave.
+ */
+export function describeRegistrationFailure(reason: string | undefined): string {
+    switch (reason) {
+        case undefined:
+        case '':
+            return 'the server refused the request'
+        case 'incorrect':
+        case 'mismatch':
+        case 'wrong_code':
+            return 'the code was not accepted'
+        case 'temporarily_unavailable':
+            return 'the server is busy — try again in a few minutes'
+        case 'too_recent':
+            return 'a code was asked for too recently — wait before asking again'
+        case 'rate_reached':
+        case 'too_many':
+            return 'too many codes were asked for — wait before asking again'
+        case 'blocked':
+            return 'the number is blocked'
+        case 'not_found':
+            return 'the server does not know the number'
+        case 'already_registered':
+            return 'the number is already an account'
+        default:
+            return reason
+    }
+}
+
+/**
  * Builds the parameters of the `/code` request.
  *
  * @param session The registration session.
@@ -765,7 +1027,7 @@ function buildCodePairs(
             'prefer_sms_over_flash',
             method === 'flash' ? 'true' : 'false',
             'simnum',
-            session.country.mcc === '000' ? '0' : '1',
+            buildSimnum(session),
             'airplane_mode_type',
             '0',
             'client_metrics',
@@ -775,7 +1037,7 @@ function buildCodePairs(
             'advertising_id',
             session.advertisingId,
             'hasinrc',
-            '1',
+            '0',
             'roaming_type',
             '0',
             'device_ram',
@@ -807,15 +1069,42 @@ function buildCodePairs(
     return [
         'method',
         method,
+        'reason',
+        '',
         'sim_mcc',
         session.country.mcc,
         'sim_mnc',
         session.country.mnc,
+        'mcc',
+        session.country.mcc,
+        'mnc',
+        session.country.mnc,
+        'network_radio_type',
+        '1',
+        'simnum',
+        buildSimnum(session),
+        'hasinrc',
+        '0',
+        'pid',
+        buildAppPid(session),
         'jailbroken',
         '0',
         'cellular_strength',
         '1',
     ]
+}
+
+/**
+ * Derives the `simnum` parameter of a request.
+ *
+ * The protocol reads it as "does the SIM carry a subscriber number of more
+ * than six digits" — a number that is written down in the SIM itself. A
+ * number the SIM does not know is a number the SIM was not issued with.
+ *
+ * @param session The registration session.
+ */
+function buildSimnum(session: LavaRegistrationSession): string {
+    return session.nationalNumber.length > 6 ? '1' : '0'
 }
 
 /**
@@ -877,7 +1166,7 @@ function buildRegisterPairs(
             'sim_type',
             session.country.mcc === '000' ? '0' : '1',
             'simnum',
-            session.country.mcc === '000' ? '0' : '1',
+            buildSimnum(session),
             'recaptcha',
             '%7B%22stage%22%3A%22ABPROP_DISABLED%22%7D',
             'client_metrics',

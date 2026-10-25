@@ -32,12 +32,14 @@ export function buildAckNode(
         participant?: string
         /** The `error` attribute, for a negative acknowledgement. */
         error?: number | string
+        /** The `class` attribute; a message by default. */
+        class?: string
     } = {},
 ): BinaryNode {
     const attrs: Record<string, string> = {
         id,
         to,
-        class: WA_MESSAGE_TYPES.ACK_CLASS_MESSAGE,
+        class: options.class ?? WA_MESSAGE_TYPES.ACK_CLASS_MESSAGE,
     }
     if (options.type) attrs.type = options.type
     if (options.participant) attrs.participant = options.participant
@@ -92,6 +94,13 @@ export function buildReceiptNode(
         from?: string
         /** The `t` attribute (Unix timestamp). */
         t?: string
+        /**
+         * The children of the receipt.
+         *
+         * A call is answered with a receipt that carries the call payload
+         * back, so the peer can tell that its offer was received.
+         */
+        content?: BinaryNode[]
     } = {},
 ): BinaryNode {
     const attrs: Record<string, string> = { id, to }
@@ -101,7 +110,13 @@ export function buildReceiptNode(
     if (options.category) attrs.category = options.category
     if (options.from) attrs.from = options.from
     if (options.t) attrs.t = options.t
-    return { tag: WA_MESSAGE_TAGS.RECEIPT, attrs }
+    return {
+        tag: WA_MESSAGE_TAGS.RECEIPT,
+        attrs,
+        ...(options.content && options.content.length > 0
+            ? { content: options.content }
+            : {}),
+    }
 }
 
 /**

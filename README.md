@@ -206,8 +206,8 @@ import { LavaClient } from 'lava'
 
 const client = new LavaClient({ transport: 'mobile' })
 
-client.on(LavaClient.AUTH_REGISTRATION_CODE, ({ phoneNumber, method }) => {
-    console.log(`a ${method} code was sent to ${phoneNumber}`)
+client.on(LavaClient.AUTH_REGISTRATION_CODE, ({ phoneNumber, method, length }) => {
+    console.log(`a ${method} code of ${length} digits was sent to ${phoneNumber}`)
 })
 client.on(LavaClient.AUTH_REGISTERED, ({ meJid }) => {
     console.log('registered as', meJid)
@@ -227,18 +227,36 @@ The phone number **must** carry a country code. A national number is rejected
 with `has no country code`, because the server files the account under the
 international form.
 
-### How the requests are signed
+### `/exist` is advisory
 
-The registration endpoints live on `https://v.whatsapp.net/v2/…` and expect an
-encrypted envelope instead of a plain form body:
+The `/exist` endpoint answers most requests with a refusal — measured live, a
+request the server refuses comes back with the same answer for *every* number,
+registered or not. Such an answer says nothing about the number, so Lava
+reports it as inconclusive instead of guessing:
 
-```text
-ENC = base64url(ephemeral X25519 public key ‖ AES-256-GCM(shared secret, zero IV) ‖ tag)
+```ts
+const status = await client.registration.status('6281234567890')
+if (status.conclusive && status.registered) {
+    // the number is an account — pair as a companion instead
+}
 ```
 
-The form body is `key=value&…` with **no** percent-encoding, and the `id`
-parameter uses the Java `toUrlHex` encoding (`%AA%BB`). Lava implements this
-from the protocol; no third-party client is involved.
+The truth comes from `/code`: it is the endpoint that decides. A number that
+cannot receive a code is refused there, and a number that already exists is
+refused as well.
+
+### A code that arrives after a restart
+
+The code arrives by SMS, which can take minutes — by the time it does, the
+process that asked for it may be gone. The material of the registration is
+therefore kept with the session, so a restarted client can still hand the code
+back:
+
+```ts
+// a fresh process, with the same credential store
+const client = new LavaClient({ transport: 'mobile', credentials: store })
+await client.registration.confirm('123456')
+```
 
 ### Platforms
 
@@ -253,6 +271,23 @@ await client.registration.requestCode('6281234567890', {
     token: 'a1b2c3…',
 })
 ```
+
+The registration announces the very same device the connection announces
+afterwards — a client without a device profile registers as an iPhone, and
+the session that follows announces that iPhone.
+
+### How the requests are signed
+
+The registration endpoints live on `https://v.whatsapp.net/v2/…` and expect an
+encrypted envelope instead of a plain form body:
+
+```text
+ENC = base64url(ephemeral X25519 public key ‖ AES-256-GCM(shared secret, zero IV) ‖ tag)
+```
+
+The form body is `key=value&…` with **no** percent-encoding, and the `id`
+parameter uses the Java `toUrlHex` encoding (`%AA%BB`). Lava implements this
+from the protocol; no third-party client is involved.
 
 ---
 
@@ -524,6 +559,19 @@ await client.call.reject(to, callId)
 await client.call.terminate(to, callId)
 ```
 
+An inbound call is announced through the `call` event:
+
+```ts
+client.on('call', (event) => {
+    // event.id, event.jid, event.video, event.direction, event.status
+    // event.status is one of 'offer', 'accept', 'reject', 'terminate'
+})
+```
+
+Lava answers the stanza itself, so the peer considers the call delivered: an
+offer, an accept, a reject and a re-key are answered with a receipt that
+carries the payload back, every other payload with a plain acknowledgement.
+
 ### `client.auth`
 
 ```ts
@@ -552,7 +600,7 @@ See [Registering a phone number](#registering-a-phone-number) for the details.
 | `auth_qr` | `{ qr, ttlMs }` |
 | `auth_pairing_code` | `{ code }` |
 | `auth_paired` | `{ meJid, meLid }` |
-| `auth_registration_code` | `{ phoneNumber, method }` |
+| `auth_registration_code` | `{ phoneNumber, method, length, wait }` |
 | `auth_registered` | `{ meJid }` |
 | `connection` | `{ state }` — `disconnected`, `connecting`, `pairing`, `connected`, `closing` |
 | `message` | `WaInboundMessage` |

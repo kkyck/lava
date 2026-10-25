@@ -26,6 +26,8 @@ import {
 } from './auth/credentials.js'
 import {
     LavaRegistration,
+    canonicalPhoneNumber,
+    describeRegistrationFailure,
     type LavaCodeRequest,
     type LavaNumberStatus,
     type LavaRegistrationOptions,
@@ -77,6 +79,8 @@ import {
     buildDeviceJid,
     getLoginIdentity,
     isGroupJid,
+    isLidJid,
+    normalizeDeviceJid,
     parsePhoneJid,
     parseSignalAddressFromJid,
     splitJid,
@@ -87,6 +91,7 @@ import {
     WA_DEFAULTS,
     WA_IQ_TYPES,
     WA_MESSAGE_TAGS,
+    WA_MESSAGE_TYPES,
     WA_NODE_TAGS,
     WA_NOTIFICATION_TYPES,
     WA_XMLNS,
@@ -197,6 +202,7 @@ import {
 import {
     decodeNodeContentBytes,
     findNodeChild,
+    getFirstNodeChild,
     getNodeChildrenByTag,
     getNodeText,
 } from './transport/node/helpers.js'
@@ -213,6 +219,12 @@ import type { GroupMetadata, GroupParticipant } from './protocol/group.js'
 import { parseRetryReceipt } from './protocol/retry.js'
 import type { RetryRequest } from './protocol/retry.js'
 import { parseFailureNode } from './protocol/failure.js'
+import {
+    WA_CALL_RECEIPT_PAYLOADS,
+    WA_CALL_STATUS,
+    parseCallKey,
+    parseCallNode,
+} from './protocol/call.js'
 import type { WaFailure } from './protocol/failure.js'
 import { OutboundMessageCache } from './message/outbound-cache.js'
 
@@ -416,7 +428,6 @@ export interface WaCallEvent {
     /** The call state. */
     status: 'offer' | 'accept' | 'reject' | 'terminate'
 }
-
 /** The credentials of the current session. */
 export interface WaSessionInfo {
     /** The account's own JID, once the device is paired. */
@@ -444,7 +455,7 @@ export class LavaClient extends EventEmitter {
     static readonly AUTH_PAIRING_CODE = 'auth_pairing_code'
     /** Emitted with `{ meJid, meLid }` once the device is paired. */
     static readonly AUTH_PAIRED = 'auth_paired'
-    /** Emitted with `{ phoneNumber, method }` when a verification code is sent. */
+    /** Emitted with `{ phoneNumber, method, length, wait }` when a code is sent. */
     static readonly AUTH_REGISTRATION_CODE = 'auth_registration_code'
     /** Emitted with `{ meJid }` once a phone number has been claimed. */
     static readonly AUTH_REGISTERED = 'auth_registered'
@@ -1254,6 +1265,9 @@ export class LavaClient extends EventEmitter {
             case WA_NODE_TAGS.IQ:
                 this.background(this.handleIq(node))
                 return
+            case WA_NODE_TAGS.CALL:
+                this.handleCall(node)
+                return
             case WA_NODE_TAGS.NOTIFICATION:
                 this.background(this.handleNotification(node))
                 return
@@ -1292,6 +1306,86 @@ export class LavaClient extends EventEmitter {
                 return this.afterConnect()
             }),
         )
+    }
+
+    /**
+     * Handles a `<call>` stanza.
+     *
+     * The peer waits for an answer before it considers the call delivered,
+     * so the stanza is answered first: an offer, an accept, a reject and a
+     * re-key are answered with a receipt that carries the payload back, every
+     * other payload with a plain acknowledgement.
+     *
+     * @param node The stanza.
+     */
+    private handleCall(node: BinaryNode): void {
+        const call = parseCallNode(node)
+        const peer = node.attrs.from ?? node.attrs.participant ?? ''
+        const stanzaId = node.attrs.id
+        const payload = getFirstNodeChild(node)
+
+        if (stanzaId && payload && WA_CALL_RECEIPT_PAYLOADS.has(call.type)) {
+            this.send(
+                buildReceiptNode(stanzaId, peer, '', {
+                    ...(this.deriveCallReceiptFrom(peer) !== undefined
+                        ? { from: this.deriveCallReceiptFrom(peer) }
+                        : {}),
+                    content: [
+                        {
+                            tag: payload.tag,
+                            attrs: {
+                                ...(call.callId !== undefined ? { 'call-id': call.callId } : {}),
+                                ...(call.creator !== undefined
+                                    ? { 'call-creator': call.creator }
+                                    : {}),
+                            },
+                        },
+                    ],
+                }),
+            )
+        } else if (stanzaId && peer) {
+            this.send(
+                buildAckNode(stanzaId, peer, {
+                    type: payload?.tag ?? WA_NODE_TAGS.CALL,
+                    class: WA_MESSAGE_TYPES.ACK_CLASS_CALL,
+                }),
+            )
+        }
+
+        const status = WA_CALL_STATUS[call.type]
+        if (!status) return
+        this.emit(LavaClient.CALL, {
+            id: call.callId ?? stanzaId ?? '',
+            jid: call.creator ?? peer,
+            video: call.video,
+            direction: 'incoming',
+            status,
+        })
+    }
+
+    /**
+     * Derives the address a call receipt is sent from.
+     *
+     * The receipt has to name the address the peer addressed: a peer that
+     * called a LID address gets a receipt from the LID address of this
+     * device, a peer that called a phone-number address gets one from the
+     * phone-number address.
+     *
+     * @param peer The address of the peer.
+     * @returns The address of this device, when it is known.
+     */
+    private deriveCallReceiptFrom(peer: string): string | undefined {
+        const meJid = this.credentials?.meJid
+        const meLid = this.credentials?.meLid
+        try {
+            if (isLidJid(peer)) {
+                return meLid ? normalizeDeviceJid(meLid) : undefined
+            }
+            return meJid ? toUserJid(meJid) : undefined
+        } catch {
+            // A malformed address is no reason to drop the receipt.
+            return undefined
+        }
     }
 
     /**
@@ -1906,6 +2000,7 @@ export class LavaClient extends EventEmitter {
 
         const key = resolveInboundMessageKey(node, senderDeviceJid, meJid, this.credentials?.meLid)
         const summary = summarizeMessageBody(body)
+        this.emitModernCall(body, key.remoteJid)
         const event: WaInboundMessage = {
             jid: key.remoteJid,
             id: key.id,
@@ -1921,6 +2016,31 @@ export class LavaClient extends EventEmitter {
             ...(node.attrs.t ? { timestamp: Number.parseInt(node.attrs.t, 10) } : {}),
         }
         this.emit(LavaClient.MESSAGE, event)
+    }
+
+    /**
+     * Announces a call that arrives as an ordinary message.
+     *
+     * The modern protocol sends a call offer as a message whose body carries
+     * a `call` field with the serialised key of the call. The key names the
+     * chat the call takes place in and whether this device called.
+     *
+     * @param body The message body.
+     * @param remoteJid The chat the message came from.
+     */
+    private emitModernCall(body: MessageContent, remoteJid: string): void {
+        const call = body.call as Record<string, unknown> | undefined
+        if (!call) return
+        const raw = call.callKey
+        if (!(raw instanceof Uint8Array)) return
+        const key = parseCallKey(raw)
+        this.emit(LavaClient.CALL, {
+            id: key.id ?? '',
+            jid: key.chatJid ?? remoteJid,
+            video: false,
+            direction: key.fromMe === true ? 'outgoing' : 'incoming',
+            status: 'offer',
+        })
     }
 
     /**
@@ -2460,6 +2580,12 @@ export class LavaClient extends EventEmitter {
         /**
          * Asks the server for a verification code for a phone number.
          *
+         * The `/exist` endpoint is consulted first, but only to catch the
+         * one case the caller cannot recover from: a number that is already
+         * an account. The endpoint answers most requests with a refusal that
+         * says nothing about the number, so the truth comes from the code
+         * request itself.
+         *
          * @param phoneNumber The phone number, in international format.
          * @param options The options.
          */
@@ -2482,13 +2608,26 @@ export class LavaClient extends EventEmitter {
             )
             if (!request.ok) {
                 throw new Error(
-                    `lava: the server refused to send a code${request.reason ? `: ${request.reason}` : ''}`,
+                    `lava: the server refused to send a code — ` +
+                        `${describeRegistrationFailure(request.reason)}`,
                 )
             }
             this.registrationSession = session
+            // The code arrives by SMS, which can take minutes: the material
+            // of the registration has to outlive the process that asked for
+            // it, or the code could never be handed back.
+            await this.updateCredentials({
+                registration: {
+                    phoneNumber: session.phoneNumber,
+                    ...LavaRegistration.materialOf(session),
+                    ...(request.method !== undefined ? { codeMethod: request.method } : {}),
+                },
+            })
             this.emit(LavaClient.AUTH_REGISTRATION_CODE, {
                 phoneNumber: session.phoneNumber,
                 method: request.method,
+                ...(request.length !== undefined ? { length: request.length } : {}),
+                ...(request.wait !== undefined ? { wait: request.wait } : {}),
             })
             return request
         },
@@ -2503,23 +2642,29 @@ export class LavaClient extends EventEmitter {
             code: string,
             options: LavaRegistrationOptions = {},
         ): Promise<LavaRegistrationResult> => {
-            const session = this.registrationSession
+            const session = this.registrationSession ?? (await this.restoreRegistrationSession())
             if (!session) {
                 throw new Error('lava: no code was requested for this session')
             }
             const result = await LavaRegistration.submitCode(session, code, options)
             if (!result.ok) {
                 throw new Error(
-                    `lava: the server refused the code${result.reason ? `: ${result.reason}` : ''}`,
+                    `lava: the server refused the code — ` +
+                        `${describeRegistrationFailure(result.reason)}`,
                 )
             }
             const canonical = result.canonicalNumber ?? session.nationalNumber
             const meJid = `${canonical}@s.whatsapp.net`
             // The sender keys name their owner.
             this.signal.senderKeyManager.setLocalAddress(meJid)
+            // The account was claimed as the device the registration
+            // described, so the connection has to announce the very same
+            // device — otherwise the server sees two different phones.
             await this.updateCredentials({
                 meJid,
                 transport: 'mobile',
+                deviceInfo: this.deviceInfoFromRegistration(session),
+                registration: undefined,
             })
             this.registrationSession = undefined
             this.emit(LavaClient.AUTH_REGISTERED, { meJid })
@@ -2528,6 +2673,10 @@ export class LavaClient extends EventEmitter {
 
         /**
          * Asks the server whether a number is already an account.
+         *
+         * The answer is advisory: the endpoint refuses most requests with an
+         * answer that says nothing about the number. `conclusive` reports
+         * whether the server actually ruled on it.
          *
          * @param phoneNumber The phone number, in international format.
          * @param options The options.
@@ -2548,6 +2697,13 @@ export class LavaClient extends EventEmitter {
      * uses, so the number is claimed by exactly the device that later logs
      * in with it.
      *
+     * The platform follows the profile the client was given, so that the
+     * registration and the connection describe the same phone. A client
+     * without a profile registers as an iPhone: the token an Android
+     * registration carries is derived from the signed application package,
+     * which no library can reproduce — so an Android registration has to
+     * bring its own token.
+     *
      * @param phoneNumber The phone number, in international format.
      * @param options The options.
      */
@@ -2561,7 +2717,13 @@ export class LavaClient extends EventEmitter {
         if (!registration || !signedPreKey) {
             throw new Error('lava: the device has no Signal identity to register with')
         }
-        const profile = this.options.deviceProfile ?? DEFAULT_ANDROID_PROFILE
+        const profile = this.options.deviceProfile ?? DEFAULT_IOS_PROFILE
+        // A registration that is already under way has to look like the very
+        // same device, so its material is carried over.
+        const stored = credentials.registration
+        const canonical = canonicalPhoneNumber(phoneNumber)
+        const material =
+            options.material ?? (stored?.phoneNumber === canonical ? stored : undefined)
         return LavaRegistration.createSession(
             phoneNumber,
             {
@@ -2579,9 +2741,10 @@ export class LavaClient extends EventEmitter {
             },
             {
                 ...options,
+                ...(material !== undefined ? { material } : {}),
                 appVersion: options.appVersion ?? profile.appVersion,
                 device: {
-                    os: options.device?.os ?? 'android',
+                    os: options.device?.os ?? profile.os,
                     model: options.device?.model ?? profile.device,
                     osVersion: options.device?.osVersion ?? profile.osVersion,
                     osBuildNumber: options.device?.osBuildNumber ?? profile.osBuildNumber,
@@ -2591,6 +2754,51 @@ export class LavaClient extends EventEmitter {
                 },
             },
         )
+    }
+
+    /**
+     * Rebuilds the registration that is under way.
+     *
+     * The verification code arrives by SMS, which can take minutes — by the
+     * time it does, the process that asked for it may be gone. The session
+     * is therefore rebuilt from the material that was kept.
+     *
+     * @returns The registration session, when there is one.
+     */
+    private async restoreRegistrationSession(): Promise<LavaRegistrationSession | undefined> {
+        const credentials = this.credentials ?? (await this.ensureCredentials())
+        const stored = credentials.registration
+        if (!stored) return undefined
+        return this.createRegistrationSession(stored.phoneNumber, {
+            material: {
+                deviceId: stored.deviceId,
+                identityId: stored.identityId,
+                advertisingId: stored.advertisingId,
+                installId: stored.installId,
+                accessSessionId: stored.accessSessionId,
+            },
+        })
+    }
+
+    /**
+     * Extracts the device a registration described.
+     *
+     * The device has to survive the registration: the account was claimed as
+     * that phone, so the connection announces it.
+     *
+     * @param session The registration session.
+     */
+    private deviceInfoFromRegistration(
+        session: LavaRegistrationSession,
+    ): NonNullable<CredentialSnapshot['deviceInfo']> {
+        return {
+            appVersion: session.device.appVersion,
+            device: session.device.model,
+            osVersion: session.device.osVersion,
+            osBuildNumber: session.device.osBuildNumber ?? '',
+            manufacturer: session.device.manufacturer,
+            os: session.device.os,
+        }
     }
 
     /**

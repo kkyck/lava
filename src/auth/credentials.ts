@@ -105,6 +105,31 @@ export interface CredentialSnapshot {
     companionEncStatic?: string
     /** The transport the device is paired for. */
     transport?: 'mobile' | 'web'
+    /**
+     * The material of a phone-number registration that is in progress.
+     *
+     * The registration is a conversation with the server that spans a
+     * verification code: the code arrives by SMS, which can take minutes,
+     * and the process that asked for it may well be gone by the time it
+     * does. The material therefore has to survive a restart — the server
+     * ties the code to the device that asked for it.
+     */
+    registration?: {
+        /** The phone number, in international format. */
+        phoneNumber: string
+        /** The random install id of the device, base64 encoded. */
+        deviceId: string
+        /** The random identity id of the device, base64 encoded. */
+        identityId: string
+        /** The advertising id of the device, a UUID. */
+        advertisingId: string
+        /** The installation folder of the device. */
+        installId: string
+        /** The session id every request of the flow carries. */
+        accessSessionId: string
+        /** The method the code was requested with. */
+        codeMethod?: 'sms' | 'voice' | 'flash' | 'wa_old'
+    }
     /** The number of successful logins since the device was paired. */
     loginCounter?: number
     /** The timestamp of the last successful connection. */

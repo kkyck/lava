@@ -256,6 +256,13 @@ export const WA_CALL_PAYLOAD_TAGS = Object.freeze({
     WEB_CLIENT: 'web_client',
 } as const)
 
+/** The children a call payload carries. */
+export const WA_CALL_CHILD_TAGS = Object.freeze({
+    VIDEO: 'video',
+    SILENCE: 'silence',
+    GROUP_INFO: 'group_info',
+} as const)
+
 /** Call stanza attributes. */
 export const WA_CALL_NODE_ATTRS = Object.freeze({
     CALL_ID: 'call-id',
