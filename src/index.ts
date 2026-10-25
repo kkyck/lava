@@ -175,7 +175,12 @@ export {
     buildMediaUploadUrl,
     defaultMediaHttpHandler,
     downloadMedia,
+    generateMediaId,
+    hostSupportsType,
+    isMediaConnExpired,
+    mediaConnNeedsRefresh,
     parseMediaConnResponse,
+    selectMediaFallbackHost,
     selectMediaHost,
     uploadMedia,
     type MediaHttpHandler,
@@ -183,6 +188,7 @@ export {
     type MediaHttpResponse,
     type MediaTransferOptions,
     type WaMediaConn,
+    type WaMediaHost,
     type WaMediaUpload,
 } from './media/transfer.js'
 
@@ -438,4 +444,8 @@ export {
     type MessageIdFormat,
 } from './util/message-id.js'
 
-export { base64UrlDecode, base64UrlEncode } from './util/base64.js'
+export {
+    base64UrlDecode,
+    base64UrlEncode,
+    base64UrlEncodePadded,
+} from './util/base64.js'

@@ -31,7 +31,8 @@ await client.message.send('6281234567890@s.whatsapp.net', 'Hello from wa-lite')
 - [Pairing](#pairing)
 - [API reference](#api-reference)
   - [`client.message`](#clientmessage)
-  - [`client.group`](#clientgroup)
+- [`client.media`](#clientmedia)
+- [`client.group`](#clientgroup)
   - [`client.profile`](#clientprofile)
   - [`client.presence`](#clientpresence)
   - [`client.privacy`](#clientprivacy)
@@ -57,8 +58,9 @@ await client.message.send('6281234567890@s.whatsapp.net', 'Hello from wa-lite')
 | Own protobuf codec | ✅ (schema-driven) | protobufjs | protobufjs |
 | Own Signal implementation | ✅ | `@whiskeysockets/baileys` | `@whiskeysockets/baileys` |
 | Own Noise handshake | ✅ | ✅ | ✅ |
+| Media upload / download | ✅ | ✅ | ✅ |
 | Calls (signalling) | ✅ | ⚠️ partial | ⚠️ partial |
-| Bundle size | **~733 KB** raw JS | ~2.5 MB | ~4 MB |
+| Bundle size | **~770 KB** raw JS | ~2.5 MB | ~4 MB |
 
 **Zero dependencies means zero supply-chain risk.** Everything — the protobuf
 codec, the Signal double ratchet, XEdDSA, the Noise handshake, the QR encoder
@@ -203,6 +205,59 @@ await client.message.createPoll(to, { name: 'Lunch?', options: [{ name: 'Pizza' 
 
 // Mark a chat as read.
 await client.message.read(to, { id: 'LAST_MESSAGE_ID' })
+```
+
+### `client.media`
+
+Media is encrypted with a per-file key (AES-256-CBC plus a truncated
+HMAC-SHA256, both derived with HKDF-SHA256), uploaded to the WhatsApp CDN and
+referenced from the message stanza. The upload token and the CDN hosts come
+from the server's `media_conn` answer, which is cached until the token
+expires.
+
+```ts
+// Send a picture, a video, a voice note, a document, a GIF or a sticker.
+const id = await client.message.sendMedia(to, bytes, {
+    type: 'image',                       // image | video | audio | ptt | document | gif | sticker
+    mimetype: 'image/jpeg',
+    caption: 'a picture',
+    width: 640,
+    height: 480,
+    fileName: 'picture.jpg',             // documents only
+    seconds: 12,                         // audio, video and voice notes
+    ptt: true,                           // voice notes
+    gifPlayback: true,                   // GIFs
+})
+
+// Or drive the two halves separately.
+const upload = await client.media.upload(bytes, { type: 'image', mimetype: 'image/jpeg' })
+const plaintext = await client.media.download(upload)
+```
+
+`client.media.download` accepts an inbound message, a raw message body, a
+media payload or the result of an upload, and returns the decrypted bytes.
+The download tries the hosts the media connection named before falling back to
+the well known CDN hosts.
+
+To plug in your own HTTP stack — for a proxy, a cache or a test — pass a
+`mediaHttp` handler:
+
+```ts
+const client = new WaClient({
+    transport: 'mobile',
+    mediaHttp: async (request) => {
+        const response = await fetch(request.url, {
+            method: request.method,
+            headers: request.headers,
+            body: request.body ? Buffer.from(request.body) : undefined,
+        })
+        return {
+            status: response.status,
+            headers: Object.fromEntries(response.headers),
+            body: new Uint8Array(await response.arrayBuffer()),
+        }
+    },
+})
 ```
 
 ### `client.group`
@@ -391,13 +446,13 @@ first, so a long-lived device never piles up key material.
 ```
 wa-lite memory benchmark
 ===================================================
-baseline (Node + library)    70.33 MB RSS
-+ 1 Signal session           73.32 MB RSS
+baseline (Node + library)    70.46 MB RSS
++ 1 Signal session           73.57 MB RSS
 + full pre-key pool (812)    75.45 MB RSS
 ===================================================
-session cost      2.99 MB
-pre-key pool cost 2.13 MB (812 pre-keys, 2.7 KB each)
-heap growth       3.15 MB
+session cost      3.11 MB
+pre-key pool cost 1.88 MB (812 pre-keys, 2.4 KB each)
+heap growth       3.13 MB
 upload batch      812 pre-keys per upload
 ciphertext        151 bytes
 schema            511 messages / 2427 fields
@@ -411,22 +466,23 @@ material.
 `npm run size` reports the code size:
 
 ```
-compiled javascript    733.2 KB
-type declarations       244.5 KB
-typescript sources     819.8 KB
+compiled javascript    769.9 KB
+type declarations       267.8 KB
+typescript sources     868.3 KB
 
 breakdown by module
 ----------------------------------------------
 proto        221.5 KB
 transport    191.0 KB
 signal        97.4 KB
-(root)        78.4 KB
-protocol      42.9 KB
+(root)        84.7 KB
+protocol      50.0 KB
 crypto        40.6 KB
 qr            35.0 KB
+media         22.3 KB
 message       12.3 KB
 auth           9.2 KB
-util           5.0 KB
+util           5.9 KB
 ----------------------------------------------
 
 runtime dependencies          0

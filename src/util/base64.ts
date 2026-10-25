@@ -15,6 +15,30 @@ const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
  * @param bytes The bytes to encode.
  */
 export function base64UrlEncode(bytes: Uint8Array): string {
+    return base64UrlEncodeInner(bytes, false)
+}
+
+/**
+ * Encodes bytes as a **padded** base64url string.
+ *
+ * The WhatsApp media CDN expects the padded form: the official client takes
+ * the standard base64 of the file hash and only swaps `+` for `-` and `/` for
+ * `_`, so the `=` padding survives. The CDN derives the expected hash from
+ * the path segment, and a strict decoder rejects an unpadded string.
+ *
+ * @param bytes The bytes to encode.
+ */
+export function base64UrlEncodePadded(bytes: Uint8Array): string {
+    return base64UrlEncodeInner(bytes, true)
+}
+
+/**
+ * Encodes bytes as a base64url string.
+ *
+ * @param bytes The bytes to encode.
+ * @param padded Whether the `=` padding is kept.
+ */
+function base64UrlEncodeInner(bytes: Uint8Array, padded: boolean): string {
     let out = ''
     let i = 0
 
@@ -36,6 +60,12 @@ export function base64UrlEncode(bytes: Uint8Array): string {
         out += ALPHABET[(chunk >> 18) & 0x3f]!
         out += ALPHABET[(chunk >> 12) & 0x3f]!
         out += ALPHABET[(chunk >> 6) & 0x3f]!
+    }
+
+    if (padded) {
+        const remainder = bytes.length % 3
+        if (remainder === 1) out += '=='
+        else if (remainder === 2) out += '='
     }
 
     return out

@@ -99,6 +99,7 @@ import { SignalSessionManager } from './signal/manager.js'
 import {
     MediaConnectionCache,
     downloadMedia,
+    generateMediaId,
     uploadMedia,
     type MediaHttpHandler,
     type MediaTransferOptions,
@@ -1586,6 +1587,7 @@ export class WaClient extends EventEmitter {
                 data,
                 type: options.type,
                 mimetype: options.mimetype,
+                mediaId: generateMediaId(),
             })
         },
 
@@ -1596,11 +1598,22 @@ export class WaClient extends EventEmitter {
          *               media payload that was extracted earlier.
          */
         download: async (
-            source: WaInboundMessage | MessageContent | MediaPayload,
+            source: WaInboundMessage | MessageContent | MediaPayload | WaMediaUpload,
         ): Promise<Uint8Array> => {
             const payload = this.resolveMediaPayload(source)
             if (!payload) throw new Error('client: the message carries no downloadable media')
-            return downloadMedia(this.mediaTransferOptions(), payload)
+            // The media connection names the CDN hosts that serve the file.
+            // When it cannot be fetched the well known hosts are used.
+            const conn = await this.mediaConn
+                .get(this.mediaTransferOptions())
+                .catch(() => null)
+            return downloadMedia(
+                {
+                    ...this.mediaTransferOptions(),
+                    ...(conn ? { conn } : {}),
+                },
+                payload,
+            )
         },
     }
 
@@ -1624,7 +1637,7 @@ export class WaClient extends EventEmitter {
      * @param source The source.
      */
     private resolveMediaPayload(
-        source: WaInboundMessage | MessageContent | MediaPayload,
+        source: WaInboundMessage | MessageContent | MediaPayload | WaMediaUpload,
     ): MediaPayload | undefined {
         if (source && typeof source === 'object' && 'message' in source) {
             return resolveMediaPayload((source as WaInboundMessage).message)

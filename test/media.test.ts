@@ -25,7 +25,12 @@ import {
     buildMediaConnIq,
     buildMediaUploadUrl,
     downloadMedia,
+    generateMediaId,
+    hostSupportsType,
+    isMediaConnExpired,
+    mediaConnNeedsRefresh,
     parseMediaConnResponse,
+    selectMediaFallbackHost,
     selectMediaHost,
     uploadMedia,
     type MediaHttpRequest,
@@ -36,7 +41,11 @@ import {
     resolveMediaPayload,
 } from '../src/protocol/media.js'
 import type { BinaryNode } from '../src/transport/binary/types.js'
-import { base64UrlEncode } from '../src/util/base64.js'
+import {
+    base64UrlDecode,
+    base64UrlEncode,
+    base64UrlEncodePadded,
+} from '../src/util/base64.js'
 
 /** A 32-byte media key. */
 const MEDIA_KEY = new Uint8Array(32).fill(7)
@@ -49,7 +58,7 @@ function mediaConnResponse(): BinaryNode {
         content: [
             {
                 tag: 'media_conn',
-                attrs: { auth: 'token-abc', ttl: '3600' },
+                attrs: { auth: 'token-abc', auth_ttl: '600', ttl: '3600' },
                 content: [
                     { tag: 'host', attrs: { hostname: 'mmg.whatsapp.net' } },
                     {
@@ -212,6 +221,113 @@ describe('media transfer', () => {
         assert.equal(conn.hosts[1]?.isFallback, true)
         // A ttl of 3600 seconds is an hour from now.
         assert.equal(conn.expiresAtMs, 1_000_000 + 3_600_000)
+        // The upload token has its own, shorter lifetime.
+        assert.equal(conn.authExpiresAtMs, 1_000_000 + 600_000)
+        assert.equal(conn.authTtlSeconds, 600)
+        assert.equal(conn.queriedAtMs, 1_000_000)
+    })
+
+    it('falls back to the routes lifetime when the token lifetime is missing', () => {
+        const response = mediaConnResponse()
+        const conn = response.content as BinaryNode[]
+        delete conn[0]!.attrs.auth_ttl
+        const parsed = parseMediaConnResponse(response, 1_000_000)
+        assert.equal(parsed.authExpiresAtMs, parsed.expiresAtMs)
+    })
+
+    it('reads the media types a host supports', () => {
+        const response = mediaConnResponse()
+        const conn = response.content as BinaryNode[]
+        conn[0]!.content = [
+            {
+                tag: 'host',
+                attrs: { hostname: 'mmg.whatsapp.net' },
+                content: [
+                    { tag: 'upload', attrs: {}, content: [{ tag: 'image', attrs: {} }] },
+                    {
+                        tag: 'download',
+                        attrs: {},
+                        content: [{ tag: 'image', attrs: {} }, { tag: 'video', attrs: {} }],
+                    },
+                ],
+            },
+        ]
+        const parsed = parseMediaConnResponse(response)
+        assert.deepEqual(parsed.hosts[0]?.uploadable, ['image'])
+        assert.deepEqual(parsed.hosts[0]?.downloadable, ['image', 'video'])
+    })
+
+    it('reads the fallback host nested inside a host', () => {
+        const response = mediaConnResponse()
+        const conn = response.content as BinaryNode[]
+        const hosts = conn[0]!.content as BinaryNode[]
+        // The server names the fallback on the host itself.
+        hosts[0]!.attrs.fallback_hostname = 'mmg-alt.whatsapp.net'
+        const parsed = parseMediaConnResponse(response)
+        assert.equal(parsed.hosts[0]?.fallback, 'mmg-alt.whatsapp.net')
+        assert.equal(
+            selectMediaFallbackHost(parsed, 'mmg.whatsapp.net'),
+            'mmg-alt.whatsapp.net',
+        )
+    })
+
+    it('keeps the designated fallback host aside', () => {
+        const conn = parseMediaConnResponse(mediaConnResponse())
+        assert.equal(
+            selectMediaFallbackHost(conn, 'mmg.whatsapp.net'),
+            'mmg-fallback.whatsapp.net',
+        )
+    })
+
+    it('picks the host that supports the media type', () => {
+        const response = mediaConnResponse()
+        const conn = response.content as BinaryNode[]
+        conn[0]!.content = [
+            {
+                tag: 'host',
+                attrs: { hostname: 'image-only.whatsapp.net' },
+                content: [
+                    { tag: 'upload', attrs: {}, content: [{ tag: 'image', attrs: {} }] },
+                ],
+            },
+            { tag: 'host', attrs: { hostname: 'general.whatsapp.net' } },
+        ]
+        const parsed = parseMediaConnResponse(response)
+        // An image can only go to the host that accepts images.
+        assert.equal(selectMediaHost(parsed, 'image', 'upload'), 'image-only.whatsapp.net')
+        // A voice note can only go to the host that accepts everything.
+        assert.equal(selectMediaHost(parsed, 'ptt', 'upload'), 'general.whatsapp.net')
+    })
+
+    it('treats a host without a type list as accepting everything', () => {
+        const conn = parseMediaConnResponse(mediaConnResponse())
+        assert.equal(hostSupportsType(conn.hosts[0]!, 'image', 'upload'), true)
+        assert.equal(hostSupportsType(conn.hosts[0]!, 'ptt', 'upload'), true)
+    })
+
+    it('expires a connection when its upload token dies', () => {
+        const conn = parseMediaConnResponse(mediaConnResponse(), 1_000_000)
+        // The token lives for 600 seconds, the routes for an hour.
+        assert.equal(isMediaConnExpired(conn, 1_000_000 + 599_000), false)
+        assert.equal(isMediaConnExpired(conn, 1_000_000 + 600_000), true)
+    })
+
+    it('refreshes a connection once 80% of the token lifetime has passed', () => {
+        const conn = parseMediaConnResponse(mediaConnResponse(), 1_000_000)
+        // 80% of 600 seconds is 480 seconds.
+        assert.equal(mediaConnNeedsRefresh(conn, 1_000_000 + 479_000), false)
+        assert.equal(mediaConnNeedsRefresh(conn, 1_000_000 + 480_000), true)
+        // The routes running out forces a refresh as well.
+        assert.equal(mediaConnNeedsRefresh(conn, 1_000_000 + 3_600_000), true)
+    })
+
+    it('generates upload ids the way the official client does', () => {
+        for (let i = 0; i < 20; i++) {
+            const id = generateMediaId()
+            assert.ok(Number.isSafeInteger(id))
+            assert.ok(id >= 1)
+            assert.ok(id <= Number.MAX_SAFE_INTEGER)
+        }
     })
 
     it('rejects a media connection without an auth token', () => {
@@ -236,10 +352,35 @@ describe('media transfer', () => {
     it('builds the upload URL the way the CDN expects it', () => {
         const hash = new Uint8Array(32).fill(1)
         const url = buildMediaUploadUrl('mmg.whatsapp.net', '/mms/image', 'tok en', hash)
-        const token = base64UrlEncode(hash)
+        // The official client puts the *padded* base64url of the hash into the
+        // path and repeats it as the `token` parameter.
+        const token = base64UrlEncodePadded(hash)
+        assert.equal(token.length, 44)
         assert.ok(url.startsWith(`https://mmg.whatsapp.net/mms/image/${token}?`))
-        assert.ok(url.includes('auth=tok%20en'))
+        assert.ok(url.includes('auth=tok+en'))
         assert.ok(url.includes(`token=${encodeURIComponent(token)}`))
+    })
+
+    it('puts the upload id into the URL when one is given', () => {
+        const hash = new Uint8Array(32).fill(1)
+        const url = buildMediaUploadUrl(
+            'mmg.whatsapp.net',
+            '/mms/image',
+            'tok',
+            hash,
+            4711,
+        )
+        assert.ok(url.includes('media_id=4711'))
+    })
+
+    it('keeps the padded and the unpadded base64url apart', () => {
+        const bytes = new Uint8Array(32).fill(1)
+        assert.equal(base64UrlEncodePadded(bytes).length, 44)
+        assert.equal(base64UrlEncode(bytes).length, 43)
+        assert.ok(base64UrlEncodePadded(bytes).endsWith('='))
+        // Both decode to the same bytes.
+        assert.deepEqual(base64UrlDecode(base64UrlEncodePadded(bytes)), bytes)
+        assert.deepEqual(base64UrlDecode(base64UrlEncode(bytes)), bytes)
     })
 
     it('uploads an encrypted file and parses the CDN answer', async () => {

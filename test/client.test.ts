@@ -1014,6 +1014,19 @@ describe('client media', () => {
         assert.equal(requests[0]!.method, 'POST')
         assert.ok(requests[0]!.url.includes('/mms/image/'))
 
+        // The URL carries the padded base64url of the encrypted file's hash
+        // and the upload token of the media connection.
+        const uploadUrl = new URL(requests[0]!.url)
+        assert.equal(uploadUrl.host, 'mmg.whatsapp.net')
+        assert.equal(uploadUrl.pathname.split('/').length, 4)
+        const token = uploadUrl.pathname.split('/')[3]!
+        assert.equal(token.length, 44)
+        assert.ok(token.endsWith('='))
+        assert.equal(uploadUrl.searchParams.get('token'), token)
+        assert.equal(uploadUrl.searchParams.get('auth'), 'test-token')
+        // The client correlates the upload with an id.
+        assert.ok(Number(uploadUrl.searchParams.get('media_id') ?? '0') >= 1)
+
         // The stanza carries the media message, not the raw bytes.
         const stanza = transport.sent.find((node) => node.tag === 'message')
         assert.ok(stanza)
@@ -1060,6 +1073,22 @@ describe('client media', () => {
             fileSha256: upload.fileSha256,
             fileEncSha256: upload.fileEncSha256,
         })
+        assert.deepEqual(downloaded, picture)
+    })
+
+    it('downloads the file it just uploaded', async () => {
+        requests.length = 0
+        stored.clear()
+        const { client } = await mediaClient()
+
+        const picture = new TextEncoder().encode('round trip bytes')
+        const upload = await client.media.upload(picture, {
+            type: 'image',
+            mimetype: 'image/jpeg',
+        })
+        assert.equal(upload.mediaType, 'image')
+
+        const downloaded = await client.media.download(upload)
         assert.deepEqual(downloaded, picture)
     })
 
