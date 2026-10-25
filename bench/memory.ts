@@ -94,7 +94,7 @@ const rows: [string, number][] = [
 ]
 
 const width = Math.max(...rows.map(([label]) => label.length))
-process.stdout.write('\nwa-lite memory benchmark\n')
+process.stdout.write('\nLava memory benchmark\n')
 process.stdout.write(`${'='.repeat(width + 26)}\n`)
 for (const [label, value] of rows) {
     process.stdout.write(`${label.padEnd(width)}  ${formatBytes(value).padStart(10)} RSS\n`)

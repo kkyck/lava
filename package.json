@@ -1,7 +1,7 @@
 {
-  "name": "wa-lite",
+  "name": "lava",
   "version": "0.1.0",
-  "description": "Ultra-lightweight, zero-dependency WhatsApp client library. Native mobile (WAP) + WhatsApp Web transports, Signal E2E, calls.",
+  "description": "Lava — an ultra-lightweight, zero-dependency WhatsApp library. Native mobile (WAP) primary + companion modes, Signal E2E, app-state sync, calls.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -32,6 +32,7 @@
     "size": "npm run build && node scripts/size.js"
   },
   "keywords": [
+    "lava",
     "whatsapp",
     "wa",
     "signal",
@@ -43,7 +44,7 @@
   "license": "MIT",
   "dependencies": {},
   "devDependencies": {
-    "@types/node": "^24.10.1",
-    "typescript": "^5.9.3"
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
   }
 }

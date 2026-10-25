@@ -1,56 +1,60 @@
-# wa-lite
+# Lava
 
 **An ultra-lightweight, zero-dependency WhatsApp client library for Node.js.**
 
-`wa-lite` speaks WhatsApp's protocol directly — the native **mobile (WAP) API**
-by default, the **WhatsApp Web** API optionally — and implements the Signal
+Lava speaks WhatsApp's protocol directly — the native **mobile (WAP) API** by
+default, the **WhatsApp Web** API optionally — and implements the Signal
 double ratchet, the Noise handshake, the binary node codec and the protobuf
 schema itself. There is **no runtime dependency at all**: the only thing you
 need is Node.js 22.
 
 ```ts
-import { WaClient } from 'wa-lite'
+import { LavaClient } from 'lava'
 
-const client = new WaClient({ transport: 'mobile' })
+const client = new LavaClient({ transport: 'mobile' })
 
 client.on('message', (m) => console.log(`${m.jid}: ${m.text}`))
 client.on('auth_qr', ({ qr }) => console.log(qr))
 
 await client.connect()
-await client.message.send('6281234567890@s.whatsapp.net', 'Hello from wa-lite')
+await client.message.send('6281234567890@s.whatsapp.net', 'Hello from Lava')
 ```
 
 ---
 
 ## Table of contents
 
-- [Why wa-lite](#why-wa-lite)
+- [Why Lava](#why-lava)
 - [Install](#install)
 - [Quick start](#quick-start)
 - [Mobile vs. Web mode](#mobile-vs-web-mode)
-- [Pairing](#pairing)
+- [Registering a phone number](#registering-a-phone-number)
+- [Pairing as a companion device](#pairing-as-a-companion-device)
 - [API reference](#api-reference)
   - [`client.message`](#clientmessage)
-- [`client.media`](#clientmedia)
-- [`client.group`](#clientgroup)
+  - [`client.media`](#clientmedia)
+  - [`client.appState`](#clientappstate)
+  - [`client.group`](#clientgroup)
   - [`client.profile`](#clientprofile)
   - [`client.presence`](#clientpresence)
   - [`client.privacy`](#clientprivacy)
   - [`client.call`](#clientcall)
   - [`client.auth`](#clientauth)
+  - [`client.registration`](#clientregistration)
   - [Events](#events)
 - [Credentials](#credentials)
 - [Security](#security)
 - [Memory footprint](#memory-footprint)
 - [Architecture](#architecture)
 - [Development](#development)
+- [Notices](#notices)
 - [License](#license)
 
 ---
 
-## Why wa-lite
+## Why Lava
 
-| | wa-lite | Baileys | Zapo |
+| | Lava | Baileys | Zapo |
 | --- | --- | --- | --- |
 | Runtime dependencies | **0** | 12+ | 20+ |
 | Native mobile (WAP) API | ✅ | ❌ | ✅ |
@@ -58,22 +62,30 @@ await client.message.send('6281234567890@s.whatsapp.net', 'Hello from wa-lite')
 | Own protobuf codec | ✅ (schema-driven) | protobufjs | protobufjs |
 | Own Signal implementation | ✅ | `@whiskeysockets/baileys` | `@whiskeysockets/baileys` |
 | Own Noise handshake | ✅ | ✅ | ✅ |
+| Phone-number registration (SMS) | ✅ | ❌ | ❌ |
 | Media upload / download | ✅ | ✅ | ✅ |
+| App-state sync (chat list, contacts) | ✅ | ⚠️ partial | ✅ |
 | Calls (signalling) | ✅ | ⚠️ partial | ⚠️ partial |
-| Bundle size | **~770 KB** raw JS | ~2.5 MB | ~4 MB |
+| Bundle size | **~888 KB** raw JS | ~2.5 MB | ~4 MB |
 
 **Zero dependencies means zero supply-chain risk.** Everything — the protobuf
-codec, the Signal double ratchet, XEdDSA, the Noise handshake, the QR encoder
-— is implemented here against Node's built-in `node:crypto`. There is no
+codec, the Signal double ratchet, XEdDSA, the Noise handshake, the QR encoder —
+is implemented here against Node's built-in `node:crypto`. There is no
 `protobufjs` reflection model, no `libsignal` WASM blob and no `qrcode`
 dependency.
+
+Lava is also **mobile-first**: the default transport is the native WAP API, the
+one the official Android and iOS apps speak. A device that talks to the server
+over the mobile protocol with a plausible device fingerprint is
+indistinguishable from the official app, which is why mobile mode is the
+default rather than an afterthought.
 
 ---
 
 ## Install
 
 ```bash
-npm install wa-lite
+npm install lava
 ```
 
 Node.js **22 or newer** is required (`node:crypto`'s X25519 support and
@@ -92,22 +104,22 @@ npm test          # compile and run the test suite
 ## Quick start
 
 ```ts
-import { WaClient, FileCredentialStore } from 'wa-lite'
+import { LavaClient, FileCredentialStore } from 'lava'
 
-const client = new WaClient({
+const client = new LavaClient({
     // `mobile` uses the native WAP API (the default); `web` uses WhatsApp Web.
     transport: 'mobile',
     // Persist the session so the device does not have to be paired again.
     credentials: new FileCredentialStore('./session.json'),
-    pushName: 'wa-lite',
+    pushName: 'Lava',
 })
 
-client.on(WaClient.AUTH_QR, ({ qr }) => console.log('Scan this:', qr))
-client.on(WaClient.MESSAGE, (message) => {
+client.on(LavaClient.AUTH_QR, ({ qr }) => console.log('Scan this:', qr))
+client.on(LavaClient.MESSAGE, (message) => {
     console.log(message.fromMe ? 'sent' : 'received', message.text)
 })
-client.on(WaClient.RECEIPT, ({ id, type }) => console.log(id, type))
-client.on(WaClient.ERROR, (error) => console.error(error))
+client.on(LavaClient.RECEIPT, ({ id, type }) => console.log(id, type))
+client.on(LavaClient.ERROR, (error) => console.error(error))
 
 await client.connect()
 
@@ -136,16 +148,102 @@ server-side fingerprinting: the server sees a stock Android build with a
 plausible device profile, not a headless browser.
 
 ```ts
-const client = new WaClient({ transport: 'web' })
+const client = new LavaClient({ transport: 'web' })
 ```
 
 Both modes share **the same** wire format underneath: the binary node codec,
 the stanza framing and the Signal encryption are identical. Only the socket
 and the client payload differ.
 
+The device profile is persisted with the session, so a reconnect keeps the same
+device identity. Override it explicitly if you want to:
+
+```ts
+const client = new LavaClient({
+    transport: 'mobile',
+    deviceProfile: {
+        appVersion: '2.26.42.71',
+        device: 'Redmi Note 12',
+        osVersion: '13',
+        osBuildNumber: 'TQ3A.230901.001',
+        manufacturer: 'Xiaomi',
+        os: 'android',
+    },
+})
+```
+
 ---
 
-## Pairing
+## Registering a phone number
+
+Lava can claim a phone number as a **primary mobile device**, the way the
+official app does after a fresh install. This is the flow the server exposes on
+the mobile API:
+
+```text
+/exist → /code → /register
+```
+
+`/exist` checks whether the number is free, `/code` asks the server to send a
+verification code by SMS (or voice call), and `/register` claims the number
+with the code the user received.
+
+```ts
+import { LavaClient } from 'lava'
+
+const client = new LavaClient({ transport: 'mobile' })
+
+client.on(LavaClient.AUTH_REGISTRATION_CODE, ({ phoneNumber, method }) => {
+    console.log(`a ${method} code was sent to ${phoneNumber}`)
+})
+client.on(LavaClient.AUTH_REGISTERED, ({ meJid }) => {
+    console.log('registered as', meJid)
+})
+
+await client.connect()
+
+// The number must be in international format: country code first.
+await client.registration.requestCode('6281234567890', { method: 'sms' })
+
+// …the user receives a six digit code…
+const result = await client.registration.confirm('123456')
+console.log(result.ok, result.canonicalNumber)
+```
+
+The phone number **must** carry a country code. A national number is rejected
+with `has no country code`, because the server files the account under the
+international form.
+
+### How the requests are signed
+
+The registration endpoints live on `https://v.whatsapp.net/v2/…` and expect an
+encrypted envelope instead of a plain form body:
+
+```text
+ENC = base64url(ephemeral X25519 public key ‖ AES-256-GCM(shared secret, zero IV) ‖ tag)
+```
+
+The form body is `key=value&…` with **no** percent-encoding, and the `id`
+parameter uses the Java `toUrlHex` encoding (`%AA%BB`). Lava implements this
+from the protocol; no third-party client is involved.
+
+### Platforms
+
+| Platform | Token | Notes |
+| --- | --- | --- |
+| `ios` (default) | derived | The static token plus `md5(appVersion ‖ national number)`. |
+| `android` | caller supplied | The Android token is derived from a signed APK, so bring your own. |
+
+```ts
+await client.registration.requestCode('6281234567890', {
+    os: 'android',
+    token: 'a1b2c3…',
+})
+```
+
+---
+
+## Pairing as a companion device
 
 A companion device has to be linked to a phone once. Two flows are supported.
 
@@ -155,9 +253,9 @@ The client emits an `auth_qr` event with the payload the phone's
 *Link a device* screen expects. Render it with the bundled encoder:
 
 ```ts
-import { WaClient, encodeQr, qrToTerminal } from 'wa-lite'
+import { LavaClient, encodeQr, qrToTerminal } from 'lava'
 
-client.on(WaClient.AUTH_QR, ({ qr }) => {
+client.on(LavaClient.AUTH_QR, ({ qr }) => {
     console.log(qrToTerminal(encodeQr(qr)))
 })
 ```
@@ -243,7 +341,7 @@ To plug in your own HTTP stack — for a proxy, a cache or a test — pass a
 `mediaHttp` handler:
 
 ```ts
-const client = new WaClient({
+const client = new LavaClient({
     transport: 'mobile',
     mediaHttp: async (request) => {
         const response = await fetch(request.url, {
@@ -259,6 +357,67 @@ const client = new WaClient({
     },
 })
 ```
+
+### `client.appState`
+
+WhatsApp keeps the chat list, the contacts, the labels and the mute and
+archive settings of an account in sync between its devices. The server only
+brokers the changes: every record is encrypted with a per-device *sync key*
+and MACed, and a digest (the LT-hash) proves that two devices hold the same
+collection without the server reading any of it.
+
+Lava speaks that protocol directly — the same key derivation
+(`WhatsApp Mutation Keys`), the same AES-256-CBC value encryption, the same
+HMAC-SHA-512 value MAC and the same 128-byte LT-hash as the official
+clients, so a Lava device and an official device can share the same
+collection state.
+
+```ts
+// Synchronise the collections of the account.
+const result = await client.appState.sync({
+    collections: ['regular', 'regular_low'],
+})
+for (const entry of result.collections) {
+    console.log(entry.collection, entry.state, entry.version, entry.uploaded)
+}
+
+// Record a change; the next round pushes it to the server.
+client.appState.set('regular', 'the-index', { pushNameSetting: { name: 'Lava' } })
+client.appState.remove('regular', 'the-other-index')
+
+// The sync keys and the collection state survive a restart.
+console.log(client.appState.keys())
+console.log(client.appState.state('regular'))
+
+// Move the sync keys between the devices of an account.
+await client.appState.share(otherDeviceJid)
+await client.appState.request(otherDeviceJid, [missingKeyId])
+```
+
+The client synchronises the app state in the background right after it
+connects, and imports the keys a peer shares with it.
+
+#### Conflicts
+
+Two devices of the same account can change the same collection while both are
+offline. The server then reports a **conflict**, and Lava handles it the way
+the official clients do:
+
+| Situation | `state` | `uploaded` | What happens |
+| --- | --- | --- | --- |
+| No local change pending | `success` | `true` | The server state wins; the device is aligned. |
+| A local change is pending | `conflict` | `false` | The server state is applied, the pending change is **held back** and re-queued for the next round. |
+
+`uploaded` defaults to `pendingCount === 0`: a round that had nothing to push
+reports `uploaded: true`.
+
+The conflict state is **sticky** across rounds, so a collection that is in
+conflict keeps reporting `conflict` until it is resolved — a client can rely
+on the flag instead of diffing the versions itself.
+
+`result.missingKeyIds` lists the sync keys the server needed but the device
+does not have. The client asks the other devices of the account for them
+through `client.appState.request`.
 
 ### `client.group`
 
@@ -319,15 +478,27 @@ client.auth.getCurrentCredentials()
 await client.auth.logout()
 ```
 
+### `client.registration`
+
+```ts
+await client.registration.requestCode('6281234567890', { method: 'sms' })
+await client.registration.confirm('123456')
+await client.registration.status('6281234567890')
+```
+
+See [Registering a phone number](#registering-a-phone-number) for the details.
+
 ### Events
 
-`WaClient` extends `EventEmitter`.
+`LavaClient` extends `EventEmitter`.
 
 | Event | Payload |
 | --- | --- |
 | `auth_qr` | `{ qr, ttlMs }` |
 | `auth_pairing_code` | `{ code }` |
 | `auth_paired` | `{ meJid, meLid }` |
+| `auth_registration_code` | `{ phoneNumber, method }` |
+| `auth_registered` | `{ meJid }` |
 | `connection` | `{ state }` — `disconnected`, `connecting`, `pairing`, `connected`, `closing` |
 | `message` | `WaInboundMessage` |
 | `message_ack` | `WaMessageAck` |
@@ -350,7 +521,7 @@ interface WaTransport {
     close(): void
 }
 
-const client = new WaClient({
+const client = new LavaClient({
     transportFactory: ({ noise, handlers }) => ({
         start: async () => { /* open the socket, feed the Noise payload */ },
         send: (node) => { /* write the stanza */ },
@@ -373,16 +544,22 @@ The session is stored through a `CredentialStore`. Two implementations ship
 with the library:
 
 ```ts
-import { MemoryCredentialStore, FileCredentialStore } from 'wa-lite'
+import { MemoryCredentialStore, FileCredentialStore } from 'lava'
 
-new MemoryCredentialStore()          // in-memory, gone on restart
-new FileCredentialStore('./wa.json')  // persisted to disk
+new MemoryCredentialStore()            // in-memory, gone on restart
+new FileCredentialStore('./lava.json')  // persisted to disk
 ```
 
 A snapshot contains the Noise identity key pair, the Signal identity key
 pair, the signed pre-key, the unused one-time pre-keys and the account's JID.
 Implement the `CredentialStore` interface to put it in a database, a
 keychain or an encrypted blob.
+
+The snapshot also holds the **app-state store** — the sync keys of the
+account and the state of every collection (the version, the digest and the
+value MAC of every record). It has to survive a restart, otherwise the device
+would ask the server for a fresh snapshot on every connection. The store is
+plain JSON, so it costs nothing but a few kilobytes.
 
 The one-time pre-keys are handed out with **sequential ids**, exactly like the
 official clients do, so they are unique inside the device and always fit the
@@ -430,6 +607,11 @@ first, so a long-lived device never piles up key material.
   mis-parsed, so a hostile server cannot crash the parser.
 - **Authenticated encryption**: AES-256-GCM is used everywhere with the
   authentication tag verified *before* the plaintext is returned.
+- **The app state never reaches the server in the clear**: every record is
+  encrypted with a per-device sync key and covered by an HMAC-SHA-512 value
+  MAC, and the collection digest (a 128-byte LT-hash) proves that two
+  devices hold the same collection without the server reading a single
+  record.
 - **One-time pre-keys** are consumed exactly once and removed from the pool.
 
 > **Note.** This library is an unofficial client. Use it in accordance with
@@ -443,45 +625,49 @@ first, so a long-lived device never piles up key material.
 
 `npm run bench` measures the resident set size of the library:
 
-```
-wa-lite memory benchmark
+```text
+Lava memory benchmark
 ===================================================
-baseline (Node + library)    70.46 MB RSS
-+ 1 Signal session           73.57 MB RSS
-+ full pre-key pool (812)    75.45 MB RSS
+baseline (Node + library)    71.11 MB RSS
++ 1 Signal session           73.73 MB RSS
++ full pre-key pool (812)    75.85 MB RSS
 ===================================================
-session cost      3.11 MB
-pre-key pool cost 1.88 MB (812 pre-keys, 2.4 KB each)
-heap growth       3.13 MB
+session cost      2.61 MB
+pre-key pool cost 2.13 MB (812 pre-keys, 2.7 KB each)
+heap growth       3.98 MB
 upload batch      812 pre-keys per upload
-ciphertext        151 bytes
-schema            511 messages / 2427 fields
+ciphertext        152 bytes
+schema            520 messages / 2456 fields
 ```
 
 The library itself adds roughly **3 MB** to a Node.js process, most of which
-is the 511-message protobuf schema and the V8 heap churn of the benchmark
+is the 520-message protobuf schema and the V8 heap churn of the benchmark
 itself. A single Signal session costs well under a megabyte of live key
-material.
+material. (The resident set size moves by a few hundred kilobytes between
+runs — the numbers above are one representative run.)
 
 `npm run size` reports the code size:
 
-```
-compiled javascript    769.9 KB
-type declarations       267.8 KB
-typescript sources     868.3 KB
+```text
+Lava size report
+==============================================
+compiled javascript    888.2 KB
+type declarations       319.9 KB
+typescript sources     1014.8 KB
 
 breakdown by module
 ----------------------------------------------
-proto        221.5 KB
+proto        223.8 KB
 transport    191.0 KB
-signal        97.4 KB
-(root)        84.7 KB
+(root)       107.1 KB
+signal        97.6 KB
+appstate      64.2 KB
 protocol      50.0 KB
 crypto        40.6 KB
+auth          38.2 KB
 qr            35.0 KB
-media         22.3 KB
+media         22.5 KB
 message       12.3 KB
-auth           9.2 KB
 util           5.9 KB
 ----------------------------------------------
 
@@ -492,13 +678,14 @@ runtime dependencies          0
 
 ## Architecture
 
-```
+```text
 src/
-├── client.ts          the WaClient orchestrator: lifecycle, routing, dispatch
-├── auth/              credentials and the pairing handshake
+├── client.ts          the LavaClient orchestrator: lifecycle, routing, dispatch
+├── appstate/          the app-state sync: crypto, keys, store, sync client
+├── auth/              credentials, the pairing handshake, the SMS registration
 ├── crypto/            primitives, XEdDSA, the Noise handshake
 ├── message/           the message codec: padding, secrets, body extraction
-├── proto/             the schema-driven protobuf codec (511 messages)
+├── proto/             the schema-driven protobuf codec (520 messages)
 ├── protocol/          JID helpers, message bodies, protocol constants
 ├── qr/                the QR encoder and the WhatsApp pairing payload
 ├── signal/            the double ratchet, key store, group sender keys
@@ -521,7 +708,7 @@ model, no code generation at runtime, one output buffer per message.
 ```bash
 npm run typecheck   # tsc --noEmit
 npm run build       # compile to dist/
-npm test            # 185 tests
+npm test            # 301 tests
 npm run bench       # memory benchmark
 npm run size        # size report
 ```
@@ -533,6 +720,30 @@ WhatsApp clients:
 node scripts/generate-schema.cjs
 node scripts/validate-schema.cjs
 ```
+
+---
+
+## Notices
+
+Lava is a **clean-room implementation**. No source code, no build output and
+no other material was copied from Baileys, Zapo, `whalibmob` or any other
+WhatsApp client library. The wire protocol was implemented from the protocol
+specification and from observing the traffic of the official clients, and the
+naming, the API shape, the code structure and the documentation in this
+repository are original work.
+
+The following are trademarks of their respective owners and are used here only
+to describe compatibility:
+
+- **WhatsApp** is a trademark of Meta Platforms, Inc.
+- **Signal** is a trademark of Signal Messenger, LLC.
+
+This project is not affiliated with, endorsed by, or sponsored by Meta
+Platforms, Inc. or Signal Messenger, LLC.
+
+WhatsApp is not affiliated with this project. Using an unofficial client may
+violate the WhatsApp Terms of Service and can lead to your account being
+banned.
 
 ---
 

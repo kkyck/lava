@@ -67,7 +67,7 @@ for (const file of distFiles) {
 }
 
 const lines = []
-lines.push('wa-lite size report')
+lines.push('Lava size report')
 lines.push('='.repeat(46))
 lines.push(`compiled javascript  ${formatBytes(jsBytes).padStart(10)}`)
 lines.push(`type declarations     ${formatBytes(dtsBytes).padStart(10)}`)
