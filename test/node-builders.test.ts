@@ -255,6 +255,47 @@ describe('signal node builders', () => {
         const bundle = selectPreKeyBundle(devices, '123@s.whatsapp.net')
         assert.equal(bundle?.regId, 7)
     })
+
+    it('takes the only bundle of the answer when nothing matches', () => {
+        // One device in the answer means there is nothing to confuse it with.
+        const devices = [
+            {
+                deviceJid: '123@lid',
+                bundle: {
+                    regId: 7,
+                    identity: new Uint8Array([0]),
+                    signedKey: { id: 1, publicKey: new Uint8Array([1]) },
+                    oneTimeKey: null,
+                },
+            },
+        ]
+        const bundle = selectPreKeyBundle(devices, '456@lid')
+        assert.equal(bundle?.regId, 7)
+    })
+
+    it('refuses to guess when the answer holds several devices', () => {
+        const devices = [
+            {
+                deviceJid: '123@lid',
+                bundle: {
+                    regId: 7,
+                    identity: new Uint8Array([0]),
+                    signedKey: { id: 1, publicKey: new Uint8Array([1]) },
+                    oneTimeKey: null,
+                },
+            },
+            {
+                deviceJid: '123:2@lid',
+                bundle: {
+                    regId: 8,
+                    identity: new Uint8Array([2]),
+                    signedKey: { id: 2, publicKey: new Uint8Array([2]) },
+                    oneTimeKey: null,
+                },
+            },
+        ]
+        assert.equal(selectPreKeyBundle(devices, '456@lid'), undefined)
+    })
 })
 
 describe('message node builders', () => {

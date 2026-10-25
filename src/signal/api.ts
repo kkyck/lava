@@ -524,6 +524,12 @@ export function selectPreKeyBundle(
             // A device JID that cannot be parsed belongs to no device.
         }
     }
+    /**
+     * The answer names one device only, so there is nothing to confuse it
+     * with: the bundle belongs to the device that was asked for, even when
+     * the server named it differently.
+     */
+    if (devices.length === 1) return devices[0]!.bundle
     return undefined
 }
 
