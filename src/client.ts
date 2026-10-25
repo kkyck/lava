@@ -899,6 +899,11 @@ export class LavaClient extends EventEmitter {
      * @param snapshot The snapshot.
      */
     private restoreSignalKeys(snapshot: CredentialSnapshot): void {
+        // The sender keys name their owner, so the address of the local
+        // device has to be known before the first group message.
+        if (snapshot.meJid) {
+            this.signal.senderKeyManager.setLocalAddress(snapshot.meJid)
+        }
         if (!this.keyStore.getRegistrationInfo()) {
             this.keyStore.setRegistrationInfo({
                 registrationId: snapshot.registrationId,
@@ -1400,6 +1405,10 @@ export class LavaClient extends EventEmitter {
         }
         const meJid = deviceNode.attrs.jid
         const meLid = deviceNode.attrs.lid
+        if (meJid) {
+            // The sender keys name their owner.
+            this.signal.senderKeyManager.setLocalAddress(meJid)
+        }
         await this.updateCredentials({
             ...(meJid ? { meJid } : {}),
             ...(meLid ? { meLid } : {}),
@@ -1915,14 +1924,15 @@ export class LavaClient extends EventEmitter {
                 )
             }
             const canonical = result.canonicalNumber ?? session.nationalNumber
+            const meJid = `${canonical}@s.whatsapp.net`
+            // The sender keys name their owner.
+            this.signal.senderKeyManager.setLocalAddress(meJid)
             await this.updateCredentials({
-                meJid: `${canonical}@s.whatsapp.net`,
+                meJid,
                 transport: 'mobile',
             })
             this.registrationSession = undefined
-            this.emit(LavaClient.AUTH_REGISTERED, {
-                meJid: `${canonical}@s.whatsapp.net`,
-            })
+            this.emit(LavaClient.AUTH_REGISTERED, { meJid })
             return result
         },
 

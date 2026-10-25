@@ -220,7 +220,7 @@ export interface SenderKeyManagerOptions {
  */
 export class SenderKeyManager {
     /** Address of the local device. */
-    private readonly localAddress: string
+    private localAddress: string
 
     /** The options the manager was created with. */
     private readonly options: SenderKeyManagerOptions
@@ -237,6 +237,18 @@ export class SenderKeyManager {
     constructor(options: SenderKeyManagerOptions = {}) {
         this.options = options
         this.localAddress = options.localAddress ?? ''
+    }
+
+    /**
+     * Sets the address of the local device.
+     *
+     * The address is only known once the credentials are restored, but the
+     * sender keys name their owner, so it has to be settable afterwards.
+     *
+     * @param localAddress The address of the local device.
+     */
+    setLocalAddress(localAddress: string): void {
+        this.localAddress = localAddress
     }
 
     /**
