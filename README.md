@@ -68,7 +68,7 @@ await client.message.send('6281234567890@s.whatsapp.net', 'Hello from Lava')
 | App-state sync (chat list, contacts) | ✅ | ⚠️ partial | ✅ |
 | Calls (signalling) | ✅ | ⚠️ partial | ⚠️ partial |
 | Group sender keys | ✅ 5 generations | ✅ 5 generations | ⚠️ 1 generation |
-| Bundle size | **~980 KB** raw JS | ~2.5 MB | ~4 MB |
+| Bundle size | **~981 KB** raw JS | ~2.5 MB | ~4 MB |
 
 **Zero dependencies means zero supply-chain risk.** Everything — the protobuf
 codec, the Signal double ratchet, XEdDSA, the Noise handshake, the QR encoder —
@@ -766,7 +766,7 @@ runs — the numbers above are one representative run.)
 ```text
 Lava size report
 ==============================================
-compiled javascript    980.7 KB
+compiled javascript    981.0 KB
 type declarations       371.3 KB
 typescript sources     1.10 MB
 
@@ -774,7 +774,7 @@ breakdown by module
 ----------------------------------------------
 proto        227.6 KB
 transport    191.2 KB
-signal       144.7 KB
+signal       144.9 KB
 (root)       131.5 KB
 appstate      64.9 KB
 protocol      61.8 KB
@@ -823,7 +823,7 @@ model, no code generation at runtime, one output buffer per message.
 ```bash
 npm run typecheck   # tsc --noEmit
 npm run build       # compile to dist/
-npm test            # 402 tests
+npm test            # 404 tests
 npm run bench       # memory benchmark
 npm run size        # size report
 ```
