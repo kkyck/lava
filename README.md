@@ -68,7 +68,7 @@ await client.message.send('6281234567890@s.whatsapp.net', 'Hello from Lava')
 | App-state sync (chat list, contacts) | ✅ | ⚠️ partial | ✅ |
 | Calls (signalling) | ✅ | ⚠️ partial | ⚠️ partial |
 | Group sender keys | ✅ 5 generations | ✅ 5 generations | ⚠️ 1 generation |
-| Bundle size | **~981 KB** raw JS | ~2.5 MB | ~4 MB |
+| Bundle size | **~1.01 MB** raw JS | ~2.5 MB | ~4 MB |
 
 **Zero dependencies means zero supply-chain risk.** Everything — the protobuf
 codec, the Signal double ratchet, XEdDSA, the Noise handshake, the QR encoder —
@@ -333,9 +333,19 @@ const code = await client.auth.requestPairingCode('6281234567890')
 console.log('Enter this code on your phone:', code)
 ```
 
+On the phone the code goes into **Settings → Linked devices → Link a device
+→ Link with phone number instead**.
+
 The code is eight Crockford base32 characters. It is stretched with
 PBKDF2-SHA256 (131 072 iterations) into the key that unwraps the phone's
 ephemeral public key, so the code never travels over the network.
+
+The client announces itself as the program that links — a browser, with the
+system it runs on — because the server only accepts the browser client types
+for this protocol. The number of pairing codes a phone may ask for is
+limited; a request that runs into the limit is answered with
+`429 rate-overlimit`, and the caller is expected to wait before it asks
+again.
 
 ---
 
