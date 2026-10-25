@@ -311,8 +311,10 @@ client.on(LavaClient.AUTH_QR, ({ qr }) => {
 The payload is the comma-separated format the official client uses:
 
 ```text
-<ref>,<base64 noise pubkey>,<base64 identity pubkey>,<base64 adv secret>,<platform>
+<ref>,<base64 noise pubkey>,<base64 identity pubkey>,<base64 adv secret>,<client type>
 ```
+
+The last field is the client type of the linking program — `1` for a browser.
 
 The server hands out a handful of references, each of which is valid for a
 limited time. The client walks through them and emits a new `auth_qr` event

@@ -2521,7 +2521,7 @@ export class LavaClient extends EventEmitter {
                     phoneJid,
                     wrappedCompanionEphemeralPub: hello.wrappedCompanionEphemeralPub,
                     companionServerAuthKeyPub: fromBase64(credentials.noiseKeyPair.pub),
-                    companionPlatformId: WA_COMPANION_PLATFORM_ID.ELECTRON,
+                    companionPlatformId: WA_COMPANION_PLATFORM_ID.CHROME,
                     companionPlatformDisplay: this.companionPlatformDisplay(),
                     shouldShowPushNotification: options.showPushNotification !== false,
                 }),

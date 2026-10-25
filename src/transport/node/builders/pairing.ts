@@ -60,9 +60,10 @@ export const WA_COMPANION_PLATFORM_ID = Object.freeze({
 /**
  * The name the phone shows for the client that links.
  *
- * The server only accepts the browser client types for the alt-pairing
- * protocol, and the display name has to match the client type: a hello
- * that announces the desktop app is answered with `400 bad-request`.
+ * The server checks the display name against the browsers it knows and
+ * answers a hello it does not recognise with `400 bad-request`. The desktop
+ * app is not part of that list — only the browsers are — so a companion
+ * device announces itself as a browser.
  */
 export const WA_COMPANION_PLATFORM_DISPLAY = 'Chrome'
 
