@@ -240,6 +240,30 @@ describe('sender keys (group chats)', () => {
         tampered[tampered.length - 1] = (tampered[tampered.length - 1]! ^ 0xff)
         assert.throws(() => bob.manager.decryptFromGroup(GROUP, ALICE, tampered))
     })
+
+    it('finds the sender key of another device of the participant', () => {
+        const alice = makePeer(ALICE)
+        const bob = makePeer(BOB)
+
+        // The stanza names the participant without its device id, but the
+        // sender key belongs to the device that sent the message.
+        const aliceSecondDevice = '11111111111:2@s.whatsapp.net'
+        const group = alice.manager.encryptForGroup(GROUP, utf8('group hello'))
+        bob.manager.processSenderKeyDistribution(GROUP, aliceSecondDevice, group.distributionMessage!)
+
+        const decrypted = bob.manager.decryptFromGroup(GROUP, ALICE, group.ciphertext)
+        assert.equal(fromUtf8(decrypted.plaintext), 'group hello')
+    })
+
+    it('ignores the sender key of a different participant', () => {
+        const alice = makePeer(ALICE)
+        const bob = makePeer(BOB)
+
+        const group = alice.manager.encryptForGroup(GROUP, utf8('group hello'))
+        bob.manager.processSenderKeyDistribution(GROUP, '33333333333:0@s.whatsapp.net', group.distributionMessage!)
+
+        assert.throws(() => bob.manager.decryptFromGroup(GROUP, ALICE, group.ciphertext))
+    })
 })
 
 // Small helpers so the test does not depend on the crypto module layout.

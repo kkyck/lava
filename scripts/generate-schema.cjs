@@ -258,6 +258,15 @@ const WANTED = [
     'SignalProtocolMessage', 'SignalDeviceList',
     // Signal group (sender key) messages
     'SenderKeyMessage', 'SenderKeyDistributionMessage',
+    // Signal record structures: the persistence format the official clients
+    // use to store the double-ratchet state and the sender keys. Reading them
+    // allows a session to be migrated from another implementation.
+    'RecordStructure', 'SessionStructure', 'SessionStructure.Chain',
+    'SessionStructure.Chain.ChainKey', 'SessionStructure.Chain.MessageKey',
+    'SessionStructure.PendingPreKey', 'SessionStructure.PendingKeyExchange',
+    'SenderKeyRecordStructure', 'SenderKeyStateStructure',
+    'SenderKeyStateStructure.SenderChainKey', 'SenderKeyStateStructure.SenderSigningKey',
+    'SenderKeyStateStructure.SenderMessageKey',
     // Notifications
     'NotificationMessage', 'NotificationMessageInfo', 'WebNotificationsInfo', 'ClientPairingProps',
     'ServerErrorNotification', 'PairSuccessNotification', 'PairErrorNotification', 'PeerDataOperationRequestMessage',

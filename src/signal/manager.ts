@@ -378,7 +378,11 @@ export class SignalSessionManager {
         sender: string,
         payload: Uint8Array,
     ): DecryptedFromPeer {
-        const plaintext = this.senderKeyManager.decryptGroupMessage(groupId, sender, payload)
+        const plaintext = this.senderKeyManager.decryptGroupMessageForParticipant(
+            groupId,
+            sender,
+            payload,
+        )
         return { plaintext, sender, registrationId: 0 }
     }
 

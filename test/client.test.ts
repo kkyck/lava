@@ -42,6 +42,9 @@ const ME_DEVICE_JID = '6281234567890:0@s.whatsapp.net'
 const PEER_JID = '6289999999999@s.whatsapp.net'
 const PEER_DEVICE_JID = '6289999999999:0@s.whatsapp.net'
 
+/** The number of times a single stanza is asked to be resent. */
+const MAX_RETRY = 3
+
 /** A peer device with its own Signal key material. */
 interface MockPeer {
     /** The peer's key store. */
@@ -943,6 +946,78 @@ describe('client messaging', () => {
         assert.ok(receipt)
         assert.equal(receipt.attrs.type, 'read')
         assert.equal(receipt.attrs.id, 'MSG1')
+    })
+
+    it('asks for a resend when a message cannot be decrypted', async () => {
+        const { client, transport } = await pairedClient()
+        await client.message.send(PEER_JID, 'first')
+
+        // A stanza the client has no session for: the payload is garbage, so
+        // no decryption can succeed.
+        transport.push({
+            tag: 'message',
+            attrs: {
+                from: PEER_JID,
+                id: 'INBOUND3',
+                type: 'text',
+                t: '1700000002',
+            },
+            content: [
+                {
+                    tag: 'enc',
+                    attrs: { v: '2', type: 'msg' },
+                    content: new Uint8Array([1, 2, 3, 4, 5]),
+                },
+            ],
+        })
+
+        await waitFor(() => transport.sent.some((node) => node.tag === 'receipt'))
+        const receipt = transport.sent.find((node) => node.tag === 'receipt')
+        assert.ok(receipt)
+        assert.equal(receipt.attrs.type, 'retry')
+        assert.equal(receipt.attrs.id, 'INBOUND3')
+        const retry = findNodeChild(receipt, 'retry')
+        assert.ok(retry)
+        assert.equal(retry.attrs.count, '1')
+
+        // The stanza is not acknowledged, so the server keeps it pending.
+        assert.equal(transport.sent.some((node) => node.tag === 'ack'), false)
+    })
+
+    it('does not ask endlessly for the same undecryptable stanza', async () => {
+        const { client, transport } = await pairedClient()
+        await client.message.send(PEER_JID, 'first')
+
+        const stanza: BinaryNode = {
+            tag: 'message',
+            attrs: {
+                from: PEER_JID,
+                id: 'INBOUND4',
+                type: 'text',
+                t: '1700000003',
+            },
+            content: [
+                {
+                    tag: 'enc',
+                    attrs: { v: '2', type: 'msg' },
+                    content: new Uint8Array([1, 2, 3, 4, 5]),
+                },
+            ],
+        }
+        transport.push(stanza)
+        await waitFor(() => transport.sent.some((node) => node.tag === 'receipt'))
+        for (let round = 0; round < 5; round += 1) {
+            transport.push(stanza)
+            await new Promise((resolve) => setTimeout(resolve, 20))
+        }
+
+        const retries = transport.sent.filter(
+            (node) => node.tag === 'receipt' && node.attrs.type === 'retry',
+        )
+        // The counter rises with every attempt, but the retries stop.
+        assert.ok(retries.length <= MAX_RETRY, `too many retries: ${retries.length}`)
+        const counts = retries.map((node) => Number(findNodeChild(node, 'retry')?.attrs.count))
+        assert.deepEqual(counts, counts.map((_, index) => index + 1))
     })
 
     it('sends a presence update', async () => {

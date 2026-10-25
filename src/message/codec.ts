@@ -109,6 +109,30 @@ function pickDistribution(value: unknown): SenderKeyDistribution | null {
     return { groupId, payload: payload as Uint8Array }
 }
 
+/** The body fields that only carry a sender-key distribution. */
+const DISTRIBUTION_FIELDS = new Set([
+    'senderKeyDistributionMessage',
+    'fastRatchetKeySenderKeyDistributionMessage',
+])
+
+/**
+ * Reports whether a body carries anything besides a sender-key distribution.
+ *
+ * A group message carries the distribution of the sender key *and* the
+ * message itself; only a body that holds nothing else is a pure
+ * distribution.
+ *
+ * @param body The message body.
+ */
+export function hasMessageContent(body: MessageContent): boolean {
+    for (const [key, value] of Object.entries(body)) {
+        if (DISTRIBUTION_FIELDS.has(key)) continue
+        if (value === null || value === undefined) continue
+        return true
+    }
+    return false
+}
+
 /**
  * A message key resolved from an inbound stanza.
  */

@@ -360,6 +360,15 @@ export {
 } from './signal/persistence.js'
 
 export {
+    decodeSenderKeyRecord,
+    decodeSenderKeyStates,
+    decodeSignalSessionRecord,
+    encodeSenderKeyRecord,
+    encodeSignalSessionRecord,
+    type DecodedSignalRecord,
+} from './signal/record.js'
+
+export {
     SenderKeyChain,
     SenderKeyManager,
     deriveSenderKeyMessageKey,

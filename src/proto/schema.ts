@@ -622,6 +622,78 @@ defineMessage('SenderKeyDistributionMessage', [
     { number: 3, name: 'chainKey', type: 'bytes' },
     { number: 4, name: 'signingKey', type: 'bytes' },
 ])
+defineMessage('RecordStructure', [
+    { number: 1, name: 'currentSession', type: 'message', message: 'SessionStructure' },
+    { number: 2, name: 'previousSessions', type: 'message', message: 'SessionStructure', repeated: true },
+])
+defineMessage('SessionStructure', [
+    { number: 1, name: 'sessionVersion', type: 'uint32' },
+    { number: 2, name: 'localIdentityPublic', type: 'bytes' },
+    { number: 3, name: 'remoteIdentityPublic', type: 'bytes' },
+    { number: 4, name: 'rootKey', type: 'bytes' },
+    { number: 5, name: 'previousCounter', type: 'uint32' },
+    { number: 6, name: 'senderChain', type: 'message', message: 'SessionStructure_Chain' },
+    { number: 7, name: 'receiverChains', type: 'message', message: 'SessionStructure_Chain', repeated: true },
+    { number: 8, name: 'pendingKeyExchange', type: 'message', message: 'SessionStructure_PendingKeyExchange' },
+    { number: 9, name: 'pendingPreKey', type: 'message', message: 'SessionStructure_PendingPreKey' },
+    { number: 10, name: 'remoteRegistrationId', type: 'uint32' },
+    { number: 11, name: 'localRegistrationId', type: 'uint32' },
+    { number: 12, name: 'needsRefresh', type: 'bool' },
+    { number: 13, name: 'aliceBaseKey', type: 'bytes' },
+])
+defineMessage('SessionStructure_Chain', [
+    { number: 1, name: 'senderRatchetKey', type: 'bytes' },
+    { number: 2, name: 'senderRatchetKeyPrivate', type: 'bytes' },
+    { number: 3, name: 'chainKey', type: 'message', message: 'SessionStructure_Chain_ChainKey' },
+    { number: 4, name: 'messageKeys', type: 'message', message: 'SessionStructure_Chain_MessageKey', repeated: true },
+])
+defineMessage('SessionStructure_Chain_ChainKey', [
+    { number: 1, name: 'index', type: 'uint32' },
+    { number: 2, name: 'key', type: 'bytes' },
+])
+defineMessage('SessionStructure_Chain_MessageKey', [
+    { number: 1, name: 'index', type: 'uint32' },
+    { number: 2, name: 'cipherKey', type: 'bytes' },
+    { number: 3, name: 'macKey', type: 'bytes' },
+    { number: 4, name: 'iv', type: 'bytes' },
+])
+defineMessage('SessionStructure_PendingPreKey', [
+    { number: 1, name: 'preKeyId', type: 'uint32' },
+    { number: 2, name: 'baseKey', type: 'bytes' },
+    { number: 3, name: 'signedPreKeyId', type: 'int32' },
+    { number: 4, name: 'kyberPreKeyId', type: 'uint32' },
+    { number: 5, name: 'kyberCiphertext', type: 'bytes' },
+])
+defineMessage('SessionStructure_PendingKeyExchange', [
+    { number: 1, name: 'sequence', type: 'uint32' },
+    { number: 2, name: 'localBaseKey', type: 'bytes' },
+    { number: 3, name: 'localBaseKeyPrivate', type: 'bytes' },
+    { number: 4, name: 'localRatchetKey', type: 'bytes' },
+    { number: 5, name: 'localRatchetKeyPrivate', type: 'bytes' },
+    { number: 7, name: 'localIdentityKey', type: 'bytes' },
+    { number: 8, name: 'localIdentityKeyPrivate', type: 'bytes' },
+])
+defineMessage('SenderKeyRecordStructure', [
+    { number: 1, name: 'senderKeyStates', type: 'message', message: 'SenderKeyStateStructure', repeated: true },
+])
+defineMessage('SenderKeyStateStructure', [
+    { number: 1, name: 'senderKeyId', type: 'uint32' },
+    { number: 2, name: 'senderChainKey', type: 'message', message: 'SenderKeyStateStructure_SenderChainKey' },
+    { number: 3, name: 'senderSigningKey', type: 'message', message: 'SenderKeyStateStructure_SenderSigningKey' },
+    { number: 4, name: 'senderMessageKeys', type: 'message', message: 'SenderKeyStateStructure_SenderMessageKey', repeated: true },
+])
+defineMessage('SenderKeyStateStructure_SenderChainKey', [
+    { number: 1, name: 'iteration', type: 'uint32' },
+    { number: 2, name: 'seed', type: 'bytes' },
+])
+defineMessage('SenderKeyStateStructure_SenderSigningKey', [
+    { number: 1, name: 'public', type: 'bytes' },
+    { number: 2, name: 'private', type: 'bytes' },
+])
+defineMessage('SenderKeyStateStructure_SenderMessageKey', [
+    { number: 1, name: 'iteration', type: 'uint32' },
+    { number: 2, name: 'seed', type: 'bytes' },
+])
 defineMessage('NotificationMessageInfo', [
     { number: 1, name: 'key', type: 'message', message: 'MessageKey' },
     { number: 2, name: 'message', type: 'message', message: 'Message' },

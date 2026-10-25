@@ -43,6 +43,7 @@ import {
     WHISPER_GROUP_INFO,
 } from './constants.js'
 import { generateSerializedKeyPair, type SerializedKeyPair } from './session.js'
+import { parseSignalAddressFromJid, signalAddressKey } from '../protocol/jid.js'
 import {
     deserializeSenderKeyRecord,
     serializeSenderKeyRecord,
@@ -385,11 +386,68 @@ export class SenderKeyManager {
      * @returns The plaintext message.
      */
     decryptGroupMessage(groupId: string, sender: string, ciphertext: Uint8Array): Uint8Array {
-        const record = this.receivedKeys.get(receiverKey(groupId, sender))
+        const key = receiverKey(groupId, sender)
+        const record = this.receivedKeys.get(key)
         if (!record) {
             throw new Error('missing sender key')
         }
+        return this.decryptWithSenderKey(key, record, ciphertext)
+    }
 
+    /**
+     * Decrypts a group message, looking for the sender key of any device of
+     * the sender.
+     *
+     * The stanza names the participant without its device id, but the sender
+     * key belongs to the device that sent the message. When the key of the
+     * named device is unknown or stale, the keys of the other devices of the
+     * same participant are tried; the key id of the message selects the right
+     * one and the signature of the sender verifies it.
+     *
+     * @param groupId The group the message belongs to.
+     * @param sender Address of the sending participant.
+     * @param ciphertext The versioned sender key message plus its signature.
+     *
+     * @returns The plaintext message.
+     */
+    decryptGroupMessageForParticipant(
+        groupId: string,
+        sender: string,
+        ciphertext: Uint8Array,
+    ): Uint8Array {
+        try {
+            return this.decryptGroupMessage(groupId, sender, ciphertext)
+        } catch (error) {
+            let lastError: unknown = error
+            let parsed: ParsedSenderKeyMessage
+            try {
+                parsed = parseSenderKeyMessage(ciphertext)
+            } catch (parseError) {
+                throw error
+            }
+            for (const [key, record] of this.findSenderKeysByKeyId(groupId, parsed.keyId, sender)) {
+                try {
+                    return this.decryptWithSenderKey(key, record, ciphertext)
+                } catch (candidateError) {
+                    lastError = candidateError
+                }
+            }
+            throw lastError
+        }
+    }
+
+    /**
+     * Decrypts a group message with a known sender key.
+     *
+     * @param key The map key of the sender key.
+     * @param record The sender key.
+     * @param ciphertext The versioned sender key message plus its signature.
+     */
+    private decryptWithSenderKey(
+        key: string,
+        record: SenderKeyRecord,
+        ciphertext: Uint8Array,
+    ): Uint8Array {
         const parsed = parseSenderKeyMessage(ciphertext)
         if (parsed.keyId !== record.keyId) {
             throw new Error('sender key id mismatch')
@@ -403,9 +461,35 @@ export class SenderKeyManager {
         const selected = selectSenderKeyMessageKey(record, parsed.iteration)
         const plaintext = aesCbcDecryptFromSeed(selected.messageKey.seed, parsed.ciphertext)
         // Only persist the advanced state after a successful decryption.
-        this.receivedKeys.set(receiverKey(groupId, sender), selected.record)
+        this.receivedKeys.set(key, selected.record)
         this.notifyChanged()
         return plaintext
+    }
+
+    /**
+     * Finds the sender keys of a group whose key id matches.
+     *
+     * @param groupId The group the keys belong to.
+     * @param keyId The key id of the message.
+     * @param sender The participant the message came from; its other devices
+     *   are candidates as well.
+     */
+    private findSenderKeysByKeyId(
+        groupId: string,
+        keyId: number,
+        sender: string,
+    ): Array<[string, SenderKeyRecord]> {
+        const wantedUser = senderAddressKey(sender).split('|')[0]
+        const prefix = `${groupId}\u0000`
+        const candidates: Array<[string, SenderKeyRecord]> = []
+        for (const [key, record] of this.receivedKeys) {
+            if (!key.startsWith(prefix)) continue
+            if (record.keyId !== keyId) continue
+            const user = key.slice(prefix.length).split('|')[0]
+            if (user !== wantedUser) continue
+            candidates.push([key, record])
+        }
+        return candidates
     }
 
     /**
@@ -601,9 +685,30 @@ export function selectSenderKeyMessageKey(
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-/** Builds the map key for a received sender key. */
+/**
+ * Builds the map key for a received sender key.
+ *
+ * The stanza names the participant as a JID, but the same participant shows up
+ * with and without a device suffix (`user@lid` and `user:2@lid` are both
+ * valid). The address is therefore normalised to `user|server|device`, the
+ * same key the Signal protocol uses for a device.
+ */
 function receiverKey(groupId: string, sender: string): string {
-    return `${groupId}\u0000${sender}`
+    return `${groupId}\u0000${senderAddressKey(sender)}`
+}
+
+/**
+ * Normalises an address into the `user|server|device` form.
+ *
+ * Addresses that cannot be parsed are used as they are, so an unexpected
+ * shape never loses the key it belongs to.
+ */
+function senderAddressKey(sender: string): string {
+    try {
+        return signalAddressKey(parseSignalAddressFromJid(sender))
+    } catch {
+        return sender
+    }
 }
 
 /** Returns a random 31-bit integer (used for sender key ids). */

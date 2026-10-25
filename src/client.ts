@@ -47,6 +47,7 @@ import {
     collectInboundEncryptions,
     decodeMessageBody,
     extractSenderKeyDistribution,
+    hasMessageContent,
     prepareOutboundPlaintext,
     resolveInboundMessageKey,
     summarizeMessageBody,
@@ -148,6 +149,7 @@ import {
     buildAckNode,
     buildNotificationAckNode,
     buildReceiptNode,
+    buildRetryReceiptNode,
 } from './transport/node/builders/global.js'
 import {
     buildCompanionFinishRequestNode,
@@ -192,6 +194,14 @@ import { buildWhatsAppQrPayload } from './qr/whatsapp.js'
 
 /** The transport a client runs on. */
 export type WaTransportMode = 'mobile' | 'web'
+
+/**
+ * The number of times a single stanza may be asked to be resent.
+ *
+ * A message that cannot be decrypted once will not become decryptable by
+ * asking again, so the retries stop after a few attempts.
+ */
+const MAX_RETRY_COUNT = 3
 
 /** The connection states a client moves through. */
 export type WaConnectionState =
@@ -455,6 +465,9 @@ export class LavaClient extends EventEmitter {
     private qrRefs: string[] = []
     private qrRefIndex = 0
 
+    /** The stanzas a retry receipt was already sent for. */
+    private readonly retryCounts = new Map<string, number>()
+
     /**
      * @param options The client options.
      */
@@ -485,6 +498,28 @@ export class LavaClient extends EventEmitter {
     }
 
     /**
+     * Reports a recoverable failure.
+     *
+     * The `error` event is special in Node: emitting it without a listener
+     * throws. A library must not take the whole application down because the
+     * user did not subscribe to the event, so the failure is only emitted
+     * when somebody is listening and logged otherwise.
+     *
+     * @param error The failure.
+     */
+    private emitError(error: unknown): void {
+        const failure = error instanceof Error ? error : new Error(String(error))
+        if (this.listenerCount(LavaClient.ERROR) > 0) {
+            this.emit(LavaClient.ERROR, failure)
+            return
+        }
+        this.logger.log({
+            level: 'warn',
+            message: `unhandled client error: ${failure.message}`,
+        })
+    }
+
+    /**
      * Persists the double-ratchet sessions.
      *
      * The write is queued with the other credential writes, so two
@@ -494,7 +529,7 @@ export class LavaClient extends EventEmitter {
         if (!this.credentials) return
         const sessions = this.signal.exportSessions()
         void this.updateCredentials({ sessions }).catch((error: unknown) => {
-            this.emit(LavaClient.ERROR, error instanceof Error ? error : new Error(String(error)))
+            this.emitError(error)
         })
     }
 
@@ -508,7 +543,7 @@ export class LavaClient extends EventEmitter {
         if (!this.credentials) return
         const senderKeys = this.signal.senderKeyManager.exportState()
         void this.updateCredentials({ senderKeys }).catch((error: unknown) => {
-            this.emit(LavaClient.ERROR, error instanceof Error ? error : new Error(String(error)))
+            this.emitError(error)
         })
     }
 
@@ -629,7 +664,7 @@ export class LavaClient extends EventEmitter {
         try {
             await this.uploadPreKeys()
         } catch (error) {
-            this.emit(LavaClient.ERROR, error)
+            this.emitError(error)
         }
         // The app state of the account is synchronised in the background:
         // a device that never syncs looks different from the official ones.
@@ -684,7 +719,7 @@ export class LavaClient extends EventEmitter {
                 this.handleClose(error)
             },
             onError: (error: Error) => {
-                this.emit(LavaClient.ERROR, error)
+                this.emitError(error)
             },
         }
 
@@ -1152,7 +1187,7 @@ export class LavaClient extends EventEmitter {
         try {
             await this.uploadPreKeys()
         } catch (error) {
-            this.emit(LavaClient.ERROR, error)
+            this.emitError(error)
         }
     }
 
@@ -1166,7 +1201,7 @@ export class LavaClient extends EventEmitter {
         try {
             await this.validateDigestAndRecoverPreKeys()
         } catch (error) {
-            this.emit(LavaClient.ERROR, error)
+            this.emitError(error)
         }
     }
 
@@ -1189,7 +1224,7 @@ export class LavaClient extends EventEmitter {
         try {
             response = await this.query(buildDigestIq())
         } catch (error) {
-            this.emit(LavaClient.ERROR, error)
+            this.emitError(error)
             return {
                 valid: false,
                 reason: 'missing_remote_digest',
@@ -1222,7 +1257,7 @@ export class LavaClient extends EventEmitter {
         try {
             digest = parseDigestResponse(response)
         } catch (error) {
-            this.emit(LavaClient.ERROR, error)
+            this.emitError(error)
             return {
                 valid: false,
                 reason: 'invalid_response',
@@ -1433,22 +1468,52 @@ export class LavaClient extends EventEmitter {
         const meJid = this.credentials?.meJid
         const sender = node.attrs.participant ?? node.attrs.from
         const encryptions = collectInboundEncryptions(node)
+        /**
+         * WhatsApp names a peer by its LID, but the stanza carries the
+         * phone-number address of the same peer next to it. The Signal state
+         * may be stored under either of the two, so both are tried.
+         */
+        const alternateSender = node.attrs.participant_pn ?? node.attrs.sender_pn
+
+        let decrypted = false
 
         for (const encryption of encryptions) {
             if (encryption.encType === 'skmsg') {
                 // A group message: the payload is encrypted with the group's
                 // sender key.
                 if (!sender) continue
+
+                let plaintext: Uint8Array | undefined
+                let failure: unknown
+                // The sender key may be stored under the phone-number address
+                // of the participant instead of its LID address.
+                for (const address of [sender, alternateSender]) {
+                    if (!address) continue
+                    try {
+                        plaintext = this.signal.decryptFromGroup(
+                            node.attrs.from ?? '',
+                            address,
+                            encryption.ciphertext,
+                        ).plaintext
+                        break
+                    } catch (error) {
+                        failure ??= error
+                    }
+                }
+
+                if (!plaintext) {
+                    if (failure) this.emitError(failure)
+                    continue
+                }
+
+                // The payload was read, so the server must not resend it,
+                // even when the message itself cannot be handled.
+                decrypted = true
                 try {
-                    const decrypted = this.signal.decryptFromGroup(
-                        node.attrs.from ?? '',
-                        sender,
-                        encryption.ciphertext,
-                    )
-                    const body = decodeMessageBody(stripInboundPadding(decrypted.plaintext))
+                    const body = decodeMessageBody(stripInboundPadding(plaintext))
                     await this.emitInboundMessage(node, sender, body, meJid)
                 } catch (error) {
-                    this.emit(LavaClient.ERROR, error)
+                    this.emitError(error)
                 }
                 continue
             }
@@ -1462,7 +1527,11 @@ export class LavaClient extends EventEmitter {
             // tried as well.
             let lastError: unknown
             let decryptedMessage: { plaintext: Uint8Array } | undefined
-            for (const address of this.senderAddresses(sender, encryption.deviceJid)) {
+            for (const address of this.senderAddresses(
+                sender,
+                encryption.deviceJid,
+                alternateSender,
+            )) {
                 try {
                     decryptedMessage = this.signal.decryptFromDevice(
                         address,
@@ -1477,16 +1546,28 @@ export class LavaClient extends EventEmitter {
             }
 
             if (!decryptedMessage) {
-                if (lastError) this.emit(LavaClient.ERROR, lastError)
+                if (lastError) this.emitError(lastError)
                 continue
             }
 
+            // The payload was read, so the server must not resend it, even
+            // when the message itself cannot be handled.
+            decrypted = true
             try {
                 const body = decodeMessageBody(stripInboundPadding(decryptedMessage.plaintext))
                 await this.emitInboundMessage(node, sender, body, meJid)
             } catch (error) {
-                this.emit(LavaClient.ERROR, error)
+                this.emitError(error)
             }
+        }
+
+        if (encryptions.length > 0 && !decrypted) {
+            // Nothing could be decrypted: the payload was encrypted with a key
+            // this device does not have. Asking the server to send the
+            // message again makes it re-encrypt it for a key this device
+            // knows.
+            this.sendRetryReceipt(node)
+            return
         }
 
         // Acknowledge the message so the server stops resending it.
@@ -1494,6 +1575,39 @@ export class LavaClient extends EventEmitter {
             buildAckNode(node.attrs.id ?? '', node.attrs.from ?? HOST_DOMAIN, {
                 type: node.attrs.type,
                 ...(node.attrs.participant ? { participant: node.attrs.participant } : {}),
+            }),
+        )
+    }
+
+    /**
+     * Asks the server to send an undecryptable message again.
+     *
+     * The retry counter of the stanza is raised with every attempt, so the
+     * server can tell a first attempt from a repeated one. A stanza is only
+     * asked for a few times: a message that cannot be decrypted once will not
+     * become decryptable by asking again, and an endless retry loop would
+     * keep the server busy.
+     */
+    private sendRetryReceipt(node: BinaryNode): void {
+        const id = node.attrs.id
+        const to = node.attrs.from
+        if (!id || !to) return
+
+        // The server repeats the stanza with a rising retry counter; when it
+        // does not, the counter of the last attempt is used.
+        const retryNode = findNodeChild(node, 'retry')
+        const stanzaCount = Number.parseInt(retryNode?.attrs.count ?? '', 10)
+        const previous = Number.isSafeInteger(stanzaCount) && stanzaCount > 0
+            ? stanzaCount
+            : (this.retryCounts.get(id) ?? 0)
+        const count = previous + 1
+        if (count > MAX_RETRY_COUNT) return
+        this.retryCounts.set(id, count)
+
+        this.send(
+            buildRetryReceiptNode(id, to, count, {
+                ...(node.attrs.participant ? { participant: node.attrs.participant } : {}),
+                ...(node.attrs.t ? { t: node.attrs.t } : {}),
             }),
         )
     }
@@ -1508,11 +1622,20 @@ export class LavaClient extends EventEmitter {
      * @param sender The sender's address, as named by the stanza.
      * @param addressedDeviceJid The device the payload was addressed to, if
      *   the server used the fan-out shape.
+     * @param alternateSender The phone-number address of the sender, when the
+     *   stanza carries one.
      */
-    private senderAddresses(sender: string, addressedDeviceJid?: string): string[] {
+    private senderAddresses(
+        sender: string,
+        addressedDeviceJid?: string,
+        alternateSender?: string,
+    ): string[] {
         const addresses: string[] = []
         if (addressedDeviceJid) addresses.push(addressedDeviceJid)
         if (!addresses.includes(sender)) addresses.push(sender)
+        if (alternateSender && !addresses.includes(alternateSender)) {
+            addresses.push(alternateSender)
+        }
 
         const userJid = toUserJid(sender)
         const known = this.deviceList.get(userJid)
@@ -1547,10 +1670,12 @@ export class LavaClient extends EventEmitter {
                     distribution.payload,
                 )
             } catch (error) {
-                this.emit(LavaClient.ERROR, error)
+                this.emitError(error)
             }
-            // A distribution-only message carries no user-visible content.
-            return
+            // A body that carries nothing but the distribution has no
+            // user-visible content; a group message carries the distribution
+            // *and* the message itself.
+            if (!hasMessageContent(body)) return
         }
 
         await this.handleProtocolMessage(body, senderDeviceJid)
@@ -3107,7 +3232,7 @@ export class LavaClient extends EventEmitter {
         try {
             response = await this.query(buildSignedPreKeyRotateIq(record))
         } catch (error) {
-            this.emit(LavaClient.ERROR, error)
+            this.emitError(error)
         }
 
         if (response && response.attrs.type === WA_IQ_TYPES.RESULT) {
