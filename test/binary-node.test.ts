@@ -112,6 +112,35 @@ describe('binary node codec', () => {
         assert.deepEqual(decoded.content, payload)
     })
 
+    it('keeps a text-like blob as raw bytes', () => {
+        // The WAP format has no separate "text blob": a string and a byte
+        // string share the same length-prefixed encoding. A blob that happens
+        // to be valid UTF-8 must still decode to bytes, otherwise a Signal
+        // pre-key id like `cc a9 0a` turns into the two character string
+        // "̉\n" and the key bundle can no longer be parsed.
+        const payload = new Uint8Array([0xcc, 0xa9, 0x0a])
+        const node: BinaryNode = {
+            tag: 'key',
+            attrs: {},
+            content: payload,
+        }
+        const decoded = decodeBinaryNode(encodeBinaryNode(node))
+        assert.ok(decoded.content instanceof Uint8Array)
+        assert.deepEqual(decoded.content, payload)
+    })
+
+    it('keeps a printable blob as raw bytes', () => {
+        const payload = new TextEncoder().encode('hello world')
+        const node: BinaryNode = {
+            tag: 'value',
+            attrs: {},
+            content: payload,
+        }
+        const decoded = decodeBinaryNode(encodeBinaryNode(node))
+        assert.ok(decoded.content instanceof Uint8Array)
+        assert.deepEqual(decoded.content, payload)
+    })
+
     it('preserves the order of the children', () => {
         const node: BinaryNode = {
             tag: 'iq',

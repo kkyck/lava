@@ -222,36 +222,6 @@ function decodeTokenString(token: number, reader: ByteReader): string {
 }
 
 /**
- * Decodes bytes that may hold text.
- *
- * The WAP format has no separate "text blob": a string and a byte string are
- * both written as a length-prefixed blob, so the only way to tell them apart
- * is to look at the bytes themselves. Content that is not valid UTF-8, or that
- * contains control characters, is binary and stays raw bytes.
- *
- * @param bytes The bytes to inspect.
- * @returns The text, or `undefined` when the bytes are not text.
- */
-function decodeTextContent(bytes: Uint8Array): string | undefined {
-    if (bytes.length === 0) return ''
-    let text: string
-    try {
-        text = STRICT_TEXT_DECODER.decode(bytes)
-    } catch {
-        return undefined
-    }
-    for (let i = 0; i < text.length; i += 1) {
-        const code = text.charCodeAt(i)
-        // C0 controls (except tab, newline and carriage return) and DEL.
-        if (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) return undefined
-        if (code === 0x7f) return undefined
-        // C1 controls.
-        if (code >= 0x80 && code <= 0x9f) return undefined
-    }
-    return text
-}
-
-/**
  * Decodes a `JID_PAIR` value.
  *
  * @param reader The reader.
@@ -349,6 +319,12 @@ function decodeValue(
 /**
  * Decodes the content of a node.
  *
+ * A length-prefixed blob is always raw bytes: the WAP format has no separate
+ * "text blob", so a blob that happens to look like text is still binary.
+ * Guessing would corrupt a payload — a Signal ciphertext or a three byte
+ * pre-key id can easily be valid UTF-8 — and the consumer knows best what it
+ * expects.
+ *
  * @param reader The reader.
  * @param token The token that introduced the content.
  * @returns The content: text, raw bytes, a child list or `null`.
@@ -360,9 +336,7 @@ function decodeContentValue(reader: ByteReader, token: number): BinaryNode['cont
     if (token === JID_INTEROP) return decodeJidInterop(reader)
     if (token === JID_FB) return decodeJidFb(reader)
     if (token === BINARY_8 || token === BINARY_20 || token === BINARY_32) {
-        const bytes = readBinary(reader, token)
-        const text = decodeTextContent(bytes)
-        return text === undefined ? bytes : text
+        return readBinary(reader, token)
     }
     return decodeTokenString(token, reader)
 }
