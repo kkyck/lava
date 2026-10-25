@@ -172,6 +172,7 @@ import {
     buildCompanionHelloRequestNode,
     buildGetCountryCodeRequestNode,
     WA_COMPANION_PLATFORM_ID,
+    WA_COMPANION_PLATFORM_DISPLAY,
     WA_SIGNALING,
 } from './transport/node/builders/pairing.js'
 import {
@@ -1665,7 +1666,7 @@ export class LavaClient extends EventEmitter {
             advSecret: credentials.advSecretKey
                 ? fromBase64(credentials.advSecretKey)
                 : new Uint8Array(32),
-            devicePlatform: WA_COMPANION_PLATFORM_ID.ELECTRON,
+            devicePlatform: WA_COMPANION_PLATFORM_ID.CHROME,
         })
     }
 
@@ -1678,16 +1679,7 @@ export class LavaClient extends EventEmitter {
      * @returns The display name.
      */
     private companionPlatformDisplay(): string {
-        const profile = this.options.deviceProfile
-        /**
-         * The linking protocol belongs to the web client, so the phone shows
-         * the program that links — not the phone it impersonates on the
-         * message API. A desktop client therefore announces itself as the
-         * desktop app, together with the system it runs on.
-         */
-        const device = profile?.propsOs ? profile.device : 'Desktop'
-        const os = profile?.propsOs ?? hostOsName()
-        return `${device} (${os})`
+        return `${WA_COMPANION_PLATFORM_DISPLAY} (${hostOsName()})`
     }
 
     /**

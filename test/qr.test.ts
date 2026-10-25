@@ -94,12 +94,12 @@ describe('whatsapp qr payload', () => {
             noisePublicKey: new Uint8Array(32).fill(1),
             identityPublicKey: new Uint8Array(32).fill(2),
             advSecret: new Uint8Array(32).fill(3),
-            devicePlatform: '7',
+            devicePlatform: '1',
         })
         const parts = payload.split(',')
         assert.equal(parts.length, 5)
         assert.equal(parts[0], 'REF123')
-        assert.equal(parts[4], '7')
+        assert.equal(parts[4], '1')
         assert.equal(base64Decode(parts[1]!)?.length, 32)
         assert.equal(base64Decode(parts[2]!)?.length, 32)
         assert.equal(base64Decode(parts[3]!)?.length, 32)
@@ -107,16 +107,16 @@ describe('whatsapp qr payload', () => {
 
     it('carries the client type in the last field', () => {
         // The phone shows the linked device under the name of the program
-        // that links, so the payload ends with the client type — `7` for the
-        // desktop app — and not with the name of the device.
+        // that links, so the payload ends with the client type — `1` for a
+        // browser — and not with the name of the device.
         const payload = buildWhatsAppQrPayload({
             ref: 'REF123',
             noisePublicKey: new Uint8Array(32).fill(1),
             identityPublicKey: new Uint8Array(32).fill(2),
             advSecret: new Uint8Array(32).fill(3),
-            devicePlatform: WA_COMPANION_PLATFORM_ID.ELECTRON,
+            devicePlatform: WA_COMPANION_PLATFORM_ID.CHROME,
         })
-        assert.equal(payload.split(',')[4], '7')
+        assert.equal(payload.split(',')[4], '1')
     })
 
     it('round-trips through the parser', () => {

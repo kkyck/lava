@@ -536,6 +536,7 @@ export {
 } from './transport/node/builders/global.js'
 
 export {
+    WA_COMPANION_PLATFORM_DISPLAY,
     WA_COMPANION_PLATFORM_ID,
     WA_SIGNALING,
     buildCompanionFinishRequestNode,

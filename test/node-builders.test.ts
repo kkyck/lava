@@ -132,7 +132,8 @@ describe('pairing node builders', () => {
     it('sends the client type as the platform id', () => {
         // The server expects the *client type* of the linking program — the
         // browser or the desktop app — as a one character string, not the
-        // platform of the device props.
+        // platform of the device props. Only the browser types are accepted
+        // for the alt-pairing protocol.
         const node = buildCompanionHelloRequestNode({
             phoneJid: '6281234567890@s.whatsapp.net',
             wrappedCompanionEphemeralPub: new Uint8Array([1]),

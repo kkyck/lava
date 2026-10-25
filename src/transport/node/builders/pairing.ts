@@ -58,6 +58,15 @@ export const WA_COMPANION_PLATFORM_ID = Object.freeze({
 } as const)
 
 /**
+ * The name the phone shows for the client that links.
+ *
+ * The server only accepts the browser client types for the alt-pairing
+ * protocol, and the display name has to match the client type: a hello
+ * that announces the desktop app is answered with `400 bad-request`.
+ */
+export const WA_COMPANION_PLATFORM_DISPLAY = 'Chrome'
+
+/**
  * Builds the `companion_hello` IQ.
  *
  * @param args The hello arguments.
