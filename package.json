@@ -1,0 +1,49 @@
+{
+  "name": "wa-lite",
+  "version": "0.1.0",
+  "description": "Ultra-lightweight, zero-dependency WhatsApp client library. Native mobile (WAP) + WhatsApp Web transports, Signal E2E, calls.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist dist-test",
+    "pretest": "npm run build:test",
+    "build:test": "tsc -p tsconfig.test.json",
+    "test": "node --test \"dist-test/test/**/*.test.js\"",
+    "prebench": "npm run build:test",
+    "bench": "node dist-test/bench/memory.js",
+    "size": "npm run build && node scripts/size.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "wa",
+    "signal",
+    "wap",
+    "mobile",
+    "lightweight",
+    "zero-dependency"
+  ],
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}

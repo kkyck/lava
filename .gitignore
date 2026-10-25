@@ -1,0 +1,16 @@
+# Build output
+dist/
+dist-test/
+
+# Dependencies
+node_modules/
+
+# Reference material: the official WhatsApp Web bundles used to verify the
+# protocol behaviour. They are third-party code and far too large to keep in
+# the history.
+refs/
+
+# Editor / OS noise
+.DS_Store
+*.log
+*.tsbuildinfo
