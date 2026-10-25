@@ -235,6 +235,12 @@ export interface PreKeyTarget {
 /**
  * Builds the IQ that fetches missing pre-key bundles.
  *
+ * The `<registration>` element is mandatory: the server silently ignores a
+ * `key_fetch` request whose device node has no registration id, so the
+ * request never gets an answer. When the registration id of a device is not
+ * known yet, zero is sent — the server then answers with the bundle and the
+ * real registration id.
+ *
  * @param users The users to fetch keys for.
  */
 export function buildMissingPreKeysFetchIq(users: PreKeyTarget[]): BinaryNode {
@@ -251,16 +257,13 @@ export function buildMissingPreKeysFetchIq(users: PreKeyTarget[]): BinaryNode {
                 content: user.devices.map((device) => ({
                     tag: WA_NODE_TAGS.DEVICE,
                     attrs: { id: String(device.deviceId) },
-                    content:
-                        device.registrationId !== undefined
-                            ? [
-                                  {
-                                      tag: WA_NODE_TAGS.REGISTRATION,
-                                      attrs: {},
-                                      content: intToBytes(4, device.registrationId),
-                                  },
-                              ]
-                            : [],
+                    content: [
+                        {
+                            tag: WA_NODE_TAGS.REGISTRATION,
+                            attrs: {},
+                            content: intToBytes(4, device.registrationId ?? 0),
+                        },
+                    ],
                 })),
             })),
         },

@@ -29,6 +29,7 @@ import {
     buildGroupSenderKeyMessageNode,
 } from '../src/transport/node/builders/message.js'
 import { findNodeChild, getNodeChildrenByTag } from '../src/transport/node/helpers.js'
+import { buildMissingPreKeysFetchIq } from '../src/signal/api.js'
 import type { BinaryNode } from '../src/transport/binary/types.js'
 
 describe('global node builders', () => {
@@ -160,6 +161,52 @@ describe('pairing node builders', () => {
         const identity = findNodeChild(sign, 'device-identity')
         assert.ok(identity)
         assert.equal(identity.attrs['key-index'], '3')
+    })
+})
+
+describe('signal node builders', () => {
+    it('always sends the registration id of a pre-key request', () => {
+        // The server silently ignores a `key_fetch` request whose device node
+        // has no `<registration>` element: it never answers, so the request
+        // times out. Zero is the "unknown" marker.
+        const node = buildMissingPreKeysFetchIq([
+            { userJid: '123@s.whatsapp.net', devices: [{ deviceId: 3 }] },
+        ])
+        assert.equal(node.attrs.xmlns, 'encrypt')
+        assert.equal(node.attrs.type, 'get')
+
+        const keyFetch = findNodeChild(node, 'key_fetch')
+        assert.ok(keyFetch)
+        const users = getNodeChildrenByTag(keyFetch, 'user')
+        assert.equal(users.length, 1)
+        assert.equal(users[0]!.attrs.jid, '123@s.whatsapp.net')
+
+        const devices = getNodeChildrenByTag(users[0]!, 'device')
+        assert.equal(devices.length, 1)
+        assert.equal(devices[0]!.attrs.id, '3')
+
+        const registration = findNodeChild(devices[0]!, 'registration')
+        assert.ok(registration, 'the registration element must never be missing')
+        assert.deepEqual(
+            Array.from(registration.content as Uint8Array),
+            [0, 0, 0, 0],
+        )
+    })
+
+    it('sends the known registration id', () => {
+        const node = buildMissingPreKeysFetchIq([
+            {
+                userJid: '123@s.whatsapp.net',
+                devices: [{ deviceId: 0, registrationId: 1621 }],
+            },
+        ])
+        const keyFetch = findNodeChild(node, 'key_fetch')
+        assert.ok(keyFetch)
+        const users = getNodeChildrenByTag(keyFetch, 'user')
+        const devices = getNodeChildrenByTag(users[0]!, 'device')
+        const registration = findNodeChild(devices[0]!, 'registration')
+        assert.ok(registration)
+        assert.deepEqual(Array.from(registration.content as Uint8Array), [0, 0, 6, 85])
     })
 })
 

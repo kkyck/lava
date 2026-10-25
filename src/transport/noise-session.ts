@@ -314,15 +314,12 @@ export class NoiseSessionDriver {
         })
         const serverHelloFrame = await this.sendAndReceive(clientHello)
 
-        let serverHello: ServerHello
-        try {
-            serverHello = parseServerHello(serverHelloFrame)
-        } catch {
-            // The server did not answer with a usable hello: fall back.
-            return false
-        }
-        if (serverHello.static.length === 0) {
-            // The server wants a full handshake; retry with the fallback name.
+        const serverHello = parseServerHello(serverHelloFrame)
+        if (serverHello.static.length > 0) {
+            // The server sent its static key, so it did not accept the
+            // resume: it answered with a full (XX) hello. The frame is
+            // reused, because the server encrypts it for the fallback
+            // protocol name.
             await this.resumeFallbackHandshake(ephemeral, serverHelloFrame)
             return true
         }
