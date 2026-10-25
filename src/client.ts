@@ -45,6 +45,7 @@ import {
 import { AppStateStore, type AppStateStoreSnapshot } from './appstate/store.js'
 import { toHex, generateX25519KeyPair, toSerializedPublicKey } from './crypto/primitives.js'
 import { randomBytesOf } from './crypto/primitives.js'
+import { hostOsName } from './util/host.js'
 import { QrFlow } from './qr/flow.js'
 import { createSilentLogger, type WaLogger } from './logger.js'
 import {
@@ -1664,8 +1665,29 @@ export class LavaClient extends EventEmitter {
             advSecret: credentials.advSecretKey
                 ? fromBase64(credentials.advSecretKey)
                 : new Uint8Array(32),
-            devicePlatform: this.options.deviceProfile?.device ?? 'Desktop',
+            devicePlatform: WA_COMPANION_PLATFORM_ID.ELECTRON,
         })
+    }
+
+    /**
+     * The name the phone shows for this client while pairing.
+     *
+     * The official client sends the name of the program and the system it
+     * runs on, e.g. `Chrome (Linux)`.
+     *
+     * @returns The display name.
+     */
+    private companionPlatformDisplay(): string {
+        const profile = this.options.deviceProfile
+        /**
+         * The linking protocol belongs to the web client, so the phone shows
+         * the program that links — not the phone it impersonates on the
+         * message API. A desktop client therefore announces itself as the
+         * desktop app, together with the system it runs on.
+         */
+        const device = profile?.propsOs ? profile.device : 'Desktop'
+        const os = profile?.propsOs ?? hostOsName()
+        return `${device} (${os})`
     }
 
     /**
@@ -2498,18 +2520,17 @@ export class LavaClient extends EventEmitter {
                 options.customCode !== undefined ? { customCode: options.customCode } : {},
             )
             await this.updateCredentials({
-                advSecretKey: toBase64(new Uint8Array(32)),
+                // The attestation secret is rotated with every pairing
+                // attempt, the way the official client does it.
+                advSecretKey: toBase64(randomBytesOf(32)),
             })
             const response = await this.query(
                 buildCompanionHelloRequestNode({
                     phoneJid,
                     wrappedCompanionEphemeralPub: hello.wrappedCompanionEphemeralPub,
                     companionServerAuthKeyPub: fromBase64(credentials.noiseKeyPair.pub),
-                    companionPlatformId:
-                        (this.options.transport ?? 'mobile') === 'web'
-                            ? WA_COMPANION_PLATFORM_ID.WEB
-                            : WA_COMPANION_PLATFORM_ID.ANDROID,
-                    companionPlatformDisplay: this.options.deviceProfile?.device ?? 'Desktop',
+                    companionPlatformId: WA_COMPANION_PLATFORM_ID.ELECTRON,
+                    companionPlatformDisplay: this.companionPlatformDisplay(),
                     shouldShowPushNotification: options.showPushNotification !== false,
                 }),
             )

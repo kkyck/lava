@@ -13,7 +13,8 @@
  * - `noisePubKey` is this device's Noise static public key.
  * - `identityPubKey` is this device's Signal identity public key.
  * - `advSecret` is the Advanced Device Attestation secret.
- * - `devicePlatform` is the name the phone shows in the device list.
+ * - `devicePlatform` is the client type of this program, e.g. `7` for the
+ *   desktop app.
  *
  * All binary values are standard base64 with padding, exactly as the
  * official client encodes them.
@@ -104,7 +105,7 @@ export interface WhatsAppQrParams {
     identityPublicKey: Uint8Array
     /** The Advanced Device Attestation secret. */
     advSecret: Uint8Array
-    /** The platform name shown on the phone, e.g. `Desktop`. */
+    /** The client type of this program, e.g. `7` for the desktop app. */
     devicePlatform: string
 }
 

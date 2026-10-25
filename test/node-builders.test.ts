@@ -110,8 +110,8 @@ describe('pairing node builders', () => {
             phoneJid: '6281234567890@s.whatsapp.net',
             wrappedCompanionEphemeralPub: new Uint8Array([1, 2, 3]),
             companionServerAuthKeyPub: new Uint8Array([4, 5, 6]),
-            companionPlatformId: WA_COMPANION_PLATFORM_ID.ANDROID,
-            companionPlatformDisplay: 'Pixel 8 Pro',
+            companionPlatformId: WA_COMPANION_PLATFORM_ID.ELECTRON,
+            companionPlatformDisplay: 'Desktop (Linux)',
         })
         assert.equal(node.tag, 'iq')
         assert.equal(node.attrs.xmlns, 'md')
@@ -127,6 +127,50 @@ describe('pairing node builders', () => {
         assert.ok(wrapped)
         assert.ok(wrapped.content instanceof Uint8Array)
         assert.deepEqual(wrapped.content, new Uint8Array([1, 2, 3]))
+    })
+
+    it('sends the client type as the platform id', () => {
+        // The server expects the *client type* of the linking program — the
+        // browser or the desktop app — as a one character string, not the
+        // platform of the device props.
+        const node = buildCompanionHelloRequestNode({
+            phoneJid: '6281234567890@s.whatsapp.net',
+            wrappedCompanionEphemeralPub: new Uint8Array([1]),
+            companionServerAuthKeyPub: new Uint8Array([2]),
+            companionPlatformId: WA_COMPANION_PLATFORM_ID.CHROME,
+            companionPlatformDisplay: 'Chrome (Linux)',
+        })
+        const reg = findNodeChild(node, 'link_code_companion_reg')
+        assert.ok(reg)
+        const platformId = findNodeChild(reg, 'companion_platform_id')
+        assert.ok(platformId)
+        assert.equal(platformId.content, '1')
+    })
+
+    it('sends a single zero byte as the pairing nonce', () => {
+        // The server drops a hello whose nonce is empty: it answers
+        // `400 bad-request` without ever handing out a pairing reference.
+        const node = buildCompanionHelloRequestNode({
+            phoneJid: '6281234567890@s.whatsapp.net',
+            wrappedCompanionEphemeralPub: new Uint8Array([1]),
+            companionServerAuthKeyPub: new Uint8Array([2]),
+            companionPlatformId: WA_COMPANION_PLATFORM_ID.ELECTRON,
+            companionPlatformDisplay: 'Desktop (Linux)',
+        })
+        const reg = findNodeChild(node, 'link_code_companion_reg')
+        assert.ok(reg)
+        const nonce = findNodeChild(reg, 'link_code_pairing_nonce')
+        assert.ok(nonce)
+        assert.ok(nonce.content instanceof Uint8Array)
+        assert.equal(nonce.content.length, 1)
+        assert.deepEqual(nonce.content, new Uint8Array([0]))
+    })
+
+    it('knows the client types of the linking protocol', () => {
+        assert.equal(WA_COMPANION_PLATFORM_ID.UNKNOWN, '0')
+        assert.equal(WA_COMPANION_PLATFORM_ID.CHROME, '1')
+        assert.equal(WA_COMPANION_PLATFORM_ID.ELECTRON, '7')
+        assert.equal(WA_COMPANION_PLATFORM_ID.OTHER_WEB_CLIENT, '9')
     })
 
     it('builds the country code IQ', () => {

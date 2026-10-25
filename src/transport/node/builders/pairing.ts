@@ -26,14 +26,35 @@ export const WA_SIGNALING = Object.freeze({
     COMPANION_REG_REFRESH_NOTIFICATION: 'companion_reg_refresh',
 } as const)
 
-/** The companion platform identifiers the server accepts. */
+/**
+ * The companion platform identifiers the server accepts.
+ *
+ * These are the *client types* of the linking protocol, not the platform
+ * types of the device props: the official client sends the type of the
+ * program that links (a browser, the desktop app), as a one-character
+ * string.
+ */
 export const WA_COMPANION_PLATFORM_ID = Object.freeze({
-    /** WhatsApp Web. */
-    WEB: 0,
-    /** WhatsApp for Android. */
-    ANDROID: 1,
-    /** WhatsApp for iOS. */
-    IOS: 2,
+    /** An unknown client. */
+    UNKNOWN: '0',
+    /** Google Chrome. */
+    CHROME: '1',
+    /** Microsoft Edge. */
+    EDGE: '2',
+    /** Mozilla Firefox. */
+    FIREFOX: '3',
+    /** Internet Explorer. */
+    IE: '4',
+    /** Opera. */
+    OPERA: '5',
+    /** Apple Safari. */
+    SAFARI: '6',
+    /** The desktop app (Electron). */
+    ELECTRON: '7',
+    /** The Windows app. */
+    UWP: '8',
+    /** Any other web client. */
+    OTHER_WEB_CLIENT: '9',
 } as const)
 
 /**
@@ -48,9 +69,9 @@ export function buildCompanionHelloRequestNode(args: {
     wrappedCompanionEphemeralPub: Uint8Array
     /** The companion's server-auth key public key. */
     companionServerAuthKeyPub: Uint8Array
-    /** The companion platform id. */
-    companionPlatformId: number
-    /** The companion platform display name. */
+    /** The companion platform id — the client type, e.g. `7` for the desktop app. */
+    companionPlatformId: string
+    /** The companion platform display name, e.g. `Desktop (Windows)`. */
     companionPlatformDisplay: string
     /** Whether the phone should show a push notification. */
     shouldShowPushNotification?: boolean
@@ -85,7 +106,7 @@ export function buildCompanionHelloRequestNode(args: {
                     {
                         tag: 'companion_platform_id',
                         attrs: {},
-                        content: new Uint8Array([args.companionPlatformId]),
+                        content: args.companionPlatformId,
                     },
                     {
                         tag: 'companion_platform_display',
@@ -95,7 +116,9 @@ export function buildCompanionHelloRequestNode(args: {
                     {
                         tag: 'link_code_pairing_nonce',
                         attrs: {},
-                        content: new Uint8Array(0),
+                        // The nonce is a single zero byte, not an empty
+                        // payload: the server drops a hello that carries none.
+                        content: new Uint8Array([0]),
                     },
                 ],
             },

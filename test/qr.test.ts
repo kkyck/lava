@@ -17,6 +17,7 @@ import {
     parseWhatsAppQrPayload,
 } from '../src/qr/whatsapp.js'
 import { base64UrlDecode, base64UrlEncode } from '../src/util/base64.js'
+import { WA_COMPANION_PLATFORM_ID } from '../src/transport/node/builders/pairing.js'
 
 describe('qr encoder', () => {
     it('produces a square matrix', () => {
@@ -93,15 +94,29 @@ describe('whatsapp qr payload', () => {
             noisePublicKey: new Uint8Array(32).fill(1),
             identityPublicKey: new Uint8Array(32).fill(2),
             advSecret: new Uint8Array(32).fill(3),
-            devicePlatform: 'Desktop',
+            devicePlatform: '7',
         })
         const parts = payload.split(',')
         assert.equal(parts.length, 5)
         assert.equal(parts[0], 'REF123')
-        assert.equal(parts[4], 'Desktop')
+        assert.equal(parts[4], '7')
         assert.equal(base64Decode(parts[1]!)?.length, 32)
         assert.equal(base64Decode(parts[2]!)?.length, 32)
         assert.equal(base64Decode(parts[3]!)?.length, 32)
+    })
+
+    it('carries the client type in the last field', () => {
+        // The phone shows the linked device under the name of the program
+        // that links, so the payload ends with the client type — `7` for the
+        // desktop app — and not with the name of the device.
+        const payload = buildWhatsAppQrPayload({
+            ref: 'REF123',
+            noisePublicKey: new Uint8Array(32).fill(1),
+            identityPublicKey: new Uint8Array(32).fill(2),
+            advSecret: new Uint8Array(32).fill(3),
+            devicePlatform: WA_COMPANION_PLATFORM_ID.ELECTRON,
+        })
+        assert.equal(payload.split(',')[4], '7')
     })
 
     it('round-trips through the parser', () => {
@@ -110,7 +125,7 @@ describe('whatsapp qr payload', () => {
             noisePublicKey: new Uint8Array(32).fill(4),
             identityPublicKey: new Uint8Array(32).fill(5),
             advSecret: new Uint8Array(32).fill(6),
-            devicePlatform: 'Pixel 8 Pro',
+            devicePlatform: '1',
         }
         const parsed = parseWhatsAppQrPayload(buildWhatsAppQrPayload(params))
         assert.ok(parsed)
