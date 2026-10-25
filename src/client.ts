@@ -201,6 +201,7 @@ import {
     buildRetryMessageNode,
     type EncryptedParticipant,
 } from './transport/node/builders/message.js'
+import { buildPassiveModeIqNode } from './transport/node/builders/passive.js'
 import {
     buildCallAcceptNode,
     buildCallOfferNode,
@@ -845,6 +846,27 @@ export class LavaClient extends EventEmitter {
             await this.uploadPreKeys()
         } catch (error) {
             this.emitError(error)
+        }
+        /**
+         * The server keeps a digest of the key bundle it holds for this
+         * device. Comparing it with the local state detects a drift — a
+         * crash in the middle of an upload, for example — which is repaired
+         * by uploading a fresh batch of pre-keys.
+         */
+        try {
+            await this.validateDigestAndRecoverPreKeys()
+        } catch (error) {
+            this.warn('signal: the key bundle did not validate', error)
+        }
+        /**
+         * The device tells the server that it is active. A device that never
+         * says so is treated as a passive one, and the server may hold its
+         * messages back.
+         */
+        try {
+            await this.query(buildPassiveModeIqNode('active'))
+        } catch (error) {
+            this.warn('presence: the active notification failed', error)
         }
         // The app state of the account is synchronised in the background:
         // a device that never syncs looks different from the official ones.
@@ -4260,17 +4282,27 @@ export class LavaClient extends EventEmitter {
         // The server did not accept the new signed pre-key. The key bundle
         // is validated against the server's digest, which tells us whether
         // the local state drifted.
-        await this.updateCredentials({
-            signedPreKey: {
-                id: record.keyId,
-                keyPair: {
-                    pub: toBase64(record.keyPair.pubKey),
-                    priv: toBase64(record.keyPair.privKey),
+        /**
+         * A rotation the server rejected must not be advertised: the server
+         * would hand the new key out and the peers could not decrypt the
+         * messages. The previous signed pre-key becomes the current one
+         * again — exactly like the official client, which only stores the
+         * new key when the server accepted it.
+         */
+        const restored = this.keyStore.restorePreviousSignedPreKey()
+        if (restored) {
+            await this.updateCredentials({
+                signedPreKey: {
+                    id: restored.keyId,
+                    keyPair: {
+                        pub: toBase64(restored.keyPair.pubKey),
+                        priv: toBase64(restored.keyPair.privKey),
+                    },
+                    signature: toBase64(restored.signature),
                 },
-                signature: toBase64(record.signature),
-            },
-            nextSignedPreKeyId: this.keyStore.getNextSignedPreKeyId(),
-        })
+                nextSignedPreKeyId: this.keyStore.getNextSignedPreKeyId(),
+            })
+        }
         if (!this.shouldDigestAfterRotateError(response)) return
         await this.validateDigestAndRecoverPreKeys().catch((error: unknown) => {
             this.emit(

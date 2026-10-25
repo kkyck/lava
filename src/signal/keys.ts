@@ -300,6 +300,22 @@ export class SignalKeyStore {
     }
 
     /**
+     * Undoes a rotation: the previous signed pre-key becomes the current
+     * one again.
+     *
+     * A rotation the server rejected must not be advertised — the server
+     * would hand out a key the peers cannot decrypt with.
+     *
+     * @returns The restored signed pre-key, or `null` when there was none.
+     */
+    restorePreviousSignedPreKey(): SignedPreKeyRecord | null {
+        if (!this.previousSignedPreKey) return null
+        this.signedPreKey = this.previousSignedPreKey
+        this.previousSignedPreKey = null
+        return this.signedPreKey
+    }
+
+    /**
      * Allocates a fresh signed pre-key id.
      *
      * Signed pre-keys have their own id namespace, so their counter is

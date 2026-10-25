@@ -12,6 +12,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { describe, it } from 'node:test'
 
 import { LavaClient } from '../src/client.js'
@@ -115,6 +116,24 @@ class MockTransport implements WaTransport {
     /** The error the server answers a signed pre-key rotation with. */
     rotateError: BinaryNode | null = null
 
+    /**
+     * Whether the server answers the digest with a hash that does not match
+     * the local state — the way it does when the key bundle drifted.
+     */
+    digestDrift = false
+
+    /**
+     * The key bundle the server holds for this device. It is filled from the
+     * pre-key uploads and stays untouched when a rotation is rejected — the
+     * server then still holds the *old* signed pre-key.
+     */
+    private serverBundle: {
+        registrationId: number
+        identity: Uint8Array
+        signedKey: { id: number; publicKey: Uint8Array; signature: Uint8Array }
+        preKeys: { id: number; publicKey: Uint8Array }[]
+    } | null = null
+
     /** The client under test, used to serve its own pre-keys. */
     client: LavaClient | null = null
 
@@ -166,6 +185,7 @@ class MockTransport implements WaTransport {
                 return { tag: 'iq', attrs: { id: node.attrs.id ?? '', type: 'result' } }
             }
             this.uploads.push(node)
+            this.captureServerBundle(node)
             return { tag: 'iq', attrs: { id: node.attrs.id ?? '', type: 'result' } }
         }
         return { tag: 'iq', attrs: { id: node.attrs.id ?? '', type: 'result' } }
@@ -222,20 +242,69 @@ class MockTransport implements WaTransport {
     }
 
     /**
-     * Answers a key-digest query with a bundle that does not match the
-     * client's local state, so the client has to upload a fresh batch.
+     * Remembers the key bundle the server holds after an upload.
+     *
+     * The server keeps the bundle it was given — it does not follow the
+     * local state, and a rejected rotation leaves the old signed pre-key
+     * in place.
+     */
+    private captureServerBundle(node: BinaryNode): void {
+        const identity = findNodeChild(node, 'identity')
+        const registration = findNodeChild(node, 'registration')
+        const signed = findNodeChild(node, 'skey')
+        const list = findNodeChild(node, 'list')
+        if (!identity || !registration || !signed || !list) return
+
+        const signedId = findNodeChild(signed, 'id')
+        const signedValue = findNodeChild(signed, 'value')
+        const signedSignature = findNodeChild(signed, 'signature')
+        if (!signedId || !signedValue || !signedSignature) return
+
+        const preKeys: { id: number; publicKey: Uint8Array }[] = []
+        for (const key of getNodeChildrenByTag(list, 'key')) {
+            const id = findNodeChild(key, 'id')
+            const value = findNodeChild(key, 'value')
+            if (!id || !value) continue
+            preKeys.push({
+                id: readUint(id.content),
+                publicKey: new Uint8Array(value.content as Uint8Array),
+            })
+        }
+
+        this.serverBundle = {
+            registrationId: readUint(registration.content),
+            identity: new Uint8Array(identity.content as Uint8Array),
+            signedKey: {
+                id: readUint(signedId.content),
+                publicKey: new Uint8Array(signedValue.content as Uint8Array),
+                signature: new Uint8Array(signedSignature.content as Uint8Array),
+            },
+            preKeys,
+        }
+    }
+
+    /**
+     * Answers a key-digest query with the bundle the server holds.
+     *
+     * The pre-keys the client has used are gone — the server handed them
+     * out — so they are not part of the digest any more. A bundle that
+     * drifted is answered with a wrong hash, so the client notices it.
      */
     private answerDigest(node: BinaryNode): BinaryNode {
-        const store = this.client?.signalManager.keyStore
-        const registration = store?.getRegistrationInfo()
-        const signed = store?.getSignedPreKey()
-        if (!registration || !signed) {
+        const bundle = this.serverBundle
+        if (!bundle) {
             return { tag: 'iq', attrs: { id: node.attrs.id ?? '', type: 'error' } }
         }
 
-        const raw = (key: Uint8Array): Uint8Array =>
-            key.length === 33 ? key.subarray(1) : key
-        const preKey = store!.listPreKeys(1)[0]
+        const store = this.client?.signalManager.keyStore
+        const held = bundle.preKeys.filter((preKey) => store?.getPreKey(preKey.id))
+
+        const hash = createHash('sha1')
+        hash.update(bundle.identity)
+        hash.update(bundle.signedKey.publicKey)
+        hash.update(bundle.signedKey.signature)
+        for (const preKey of held) hash.update(preKey.publicKey)
+        const digest = new Uint8Array(hash.digest())
 
         return {
             tag: 'iq',
@@ -248,13 +317,13 @@ class MockTransport implements WaTransport {
                         {
                             tag: 'registration',
                             attrs: {},
-                            content: intToBytes(4, registration.registrationId),
+                            content: intToBytes(4, bundle.registrationId),
                         },
                         { tag: 'type', attrs: {}, content: new Uint8Array([5]) },
                         {
                             tag: 'identity',
                             attrs: {},
-                            content: raw(registration.identityKeyPair.pubKey),
+                            content: bundle.identity,
                         },
                         {
                             tag: 'skey',
@@ -263,36 +332,34 @@ class MockTransport implements WaTransport {
                                 {
                                     tag: 'id',
                                     attrs: {},
-                                    content: intToBytes(3, signed.keyId),
+                                    content: intToBytes(3, bundle.signedKey.id),
                                 },
                                 {
                                     tag: 'value',
                                     attrs: {},
-                                    content: raw(signed.keyPair.pubKey),
+                                    content: bundle.signedKey.publicKey,
                                 },
                                 {
                                     tag: 'signature',
                                     attrs: {},
-                                    content: signed.signature,
+                                    content: bundle.signedKey.signature,
                                 },
                             ],
                         },
                         {
                             tag: 'list',
                             attrs: {},
-                            content: preKey
-                                ? [
-                                      {
-                                          tag: 'key',
-                                          attrs: {},
-                                          content: intToBytes(3, preKey.keyId),
-                                      },
-                                  ]
-                                : [],
+                            content: held.map((preKey) => ({
+                                tag: 'key',
+                                attrs: {},
+                                content: intToBytes(3, preKey.id),
+                            })),
                         },
-                        // A deliberately wrong hash: the client has to notice
-                        // the drift and upload a fresh batch.
-                        { tag: 'hash', attrs: {}, content: new Uint8Array(20) },
+                        {
+                            tag: 'hash',
+                            attrs: {},
+                            content: this.digestDrift ? new Uint8Array(20) : digest,
+                        },
                     ],
                 },
             ],
@@ -485,6 +552,14 @@ function intToBytes(length: number, value: number): Uint8Array {
         remaining = Math.floor(remaining / 256)
     }
     return out
+}
+
+/** Reads a big-endian number the way the protocol encodes it. */
+function readUint(content: unknown): number {
+    const bytes = content instanceof Uint8Array ? content : new Uint8Array(0)
+    let value = 0
+    for (const byte of bytes) value = value * 256 + byte
+    return value
 }
 
 /** Builds a client wired to a mock transport. */
@@ -730,6 +805,9 @@ describe('client pre-keys', () => {
         const { client, transport } = await pairedClient()
         assert.equal(transport.uploads.length, 1)
 
+        // The server holds a bundle that does not match the local state.
+        transport.digestDrift = true
+
         // The server asks the client to validate its key bundle.
         transport.push({
             tag: 'notification',
@@ -782,6 +860,9 @@ describe('client pre-keys', () => {
         const { client, transport } = await pairedClient()
         const uploadsBefore = transport.uploads.length
 
+        // The server holds a bundle that does not match the local state.
+        transport.digestDrift = true
+
         // The server rejects the rotated signed pre-key with a `409`.
         transport.rotateError = {
             tag: 'iq',
@@ -796,6 +877,55 @@ describe('client pre-keys', () => {
         // drift is repaired with a fresh batch.
         await waitFor(() => transport.uploads.length > uploadsBefore)
         assert.equal(client.signalManager.keyStore.getServerHasPreKeys(), true)
+    })
+
+    it('does not upload a fresh batch when the key bundle still matches', async () => {
+        const { client, transport } = await pairedClient()
+        const uploadsBefore = transport.uploads.length
+
+        // The server rejects the rotated signed pre-key with a `409`.
+        transport.rotateError = {
+            tag: 'iq',
+            attrs: { id: 'rotate-1', type: 'error' },
+            content: [
+                { tag: 'error', attrs: { code: '409', text: 'conflict' } },
+            ],
+        }
+        await client.rotateSignedPreKey()
+
+        /**
+         * The rejected rotation is undone, so the local state matches the
+         * bundle the server holds — there is nothing to repair.
+         */
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        assert.equal(transport.uploads.length, uploadsBefore)
+    })
+
+    it('keeps the old signed pre-key when the server rejects the rotation', async () => {
+        const { client, transport } = await pairedClient()
+        const store = client.signalManager.keyStore
+        const before = store.getSignedPreKey()
+        assert.ok(before)
+
+        // The server rejects the rotated signed pre-key with a `409`.
+        transport.rotateError = {
+            tag: 'iq',
+            attrs: { id: 'rotate-1', type: 'error' },
+            content: [
+                { tag: 'error', attrs: { code: '409', text: 'conflict' } },
+            ],
+        }
+        await client.rotateSignedPreKey()
+
+        /**
+         * The server still hands out the old key, so the device has to keep
+         * it — a peer that fetched it could not decrypt the message
+         * otherwise.
+         */
+        const after = store.getSignedPreKey()
+        assert.ok(after)
+        assert.equal(after!.keyId, before!.keyId)
+        assert.deepEqual(after!.keyPair.pubKey, before!.keyPair.pubKey)
     })
 
 
