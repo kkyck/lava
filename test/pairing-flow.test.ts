@@ -276,6 +276,96 @@ describe('pairing code flow', () => {
 
         client.disconnect()
     })
+
+    it('acknowledges the primary hello notification', async () => {
+        const { client, transport } = makeClient()
+        await client.connect()
+
+        transport.query = async (node: BinaryNode) => {
+            transport.queries.push(node)
+            return {
+                tag: 'iq',
+                attrs: { id: node.attrs.id ?? '', type: 'result' },
+                content: [
+                    {
+                        tag: 'link_code_companion_reg',
+                        attrs: { stage: 'companion_hello' },
+                        content: [
+                            {
+                                tag: 'link_code_pairing_ref',
+                                attrs: {},
+                                content: 'ref-42',
+                            },
+                        ],
+                    },
+                ],
+            }
+        }
+
+        await client.auth.requestPairingCode('6281234567890')
+
+        const codes: string[] = []
+        client.on(LavaClient.AUTH_PAIRING_CODE, ({ code }: { code: string }) =>
+            codes.push(code),
+        )
+        await client.auth.requestPairingCode('6281234567890')
+        const code = codes[0] as string
+
+        const primaryPrivate = new Uint8Array(32).fill(7)
+        const primaryPublic = x25519PublicFromPrivate(primaryPrivate)
+        const primarySalt = new Uint8Array(32).fill(3)
+        const primaryCounter = new Uint8Array(16).fill(4)
+        const wrappedPrimary = new Uint8Array(32 + 16 + 32)
+        wrappedPrimary.set(primarySalt, 0)
+        wrappedPrimary.set(primaryCounter, 32)
+        wrappedPrimary.set(
+            aesCtrEncrypt(
+                pbkdf2Sha256(utf8(code), primarySalt, 2 << 16, 32),
+                primaryCounter,
+                primaryPublic,
+            ),
+            48,
+        )
+
+        transport.handlers.onNode?.({
+            tag: 'notification',
+            attrs: { id: 'note-7', type: 'link_code_companion_reg', from: 's.whatsapp.net' },
+            content: [
+                {
+                    tag: 'link_code_companion_reg',
+                    attrs: { stage: 'primary_hello' },
+                    content: [
+                        { tag: 'link_code_pairing_ref', attrs: {}, content: 'ref-42' },
+                        {
+                            tag: 'link_code_pairing_wrapped_primary_ephemeral_pub',
+                            attrs: {},
+                            content: wrappedPrimary,
+                        },
+                        {
+                            tag: 'primary_identity_pub',
+                            attrs: {},
+                            content: new Uint8Array(32).fill(9),
+                        },
+                    ],
+                },
+            ],
+        })
+
+        /**
+         * The server waits for the acknowledgement of the notification. A
+         * client that stays silent makes the server send the hello again.
+         */
+        await waitFor(() =>
+            transport.sent.some(
+                (node) =>
+                    node.tag === 'ack' &&
+                    node.attrs.id === 'note-7' &&
+                    node.attrs.class === 'notification',
+            ),
+        )
+
+        client.disconnect()
+    })
 })
 
 describe('server pings', () => {

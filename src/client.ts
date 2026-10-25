@@ -1403,6 +1403,19 @@ export class LavaClient extends EventEmitter {
     private async handleNotification(node: BinaryNode): Promise<void> {
         const linkCode = findNodeChild(node, WA_NODE_TAGS.LINK_CODE_COMPANION_REG)
         if (linkCode?.attrs.stage === WA_SIGNALING.LINK_CODE_STAGE_PRIMARY_HELLO) {
+            /**
+             * The server waits for the acknowledgement of the notification
+             * before it sends the primary hello again, so the ack goes out
+             * first — exactly like the official client does it.
+             */
+            this.send(
+                buildNotificationAckNode(
+                    node.attrs.id,
+                    node.attrs.from ?? HOST_DOMAIN,
+                    node.attrs.type ?? WA_NODE_TAGS.NOTIFICATION,
+                    node.attrs.participant,
+                ),
+            )
             await this.handlePrimaryHello(linkCode)
             return
         }
