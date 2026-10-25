@@ -19,6 +19,7 @@ import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 import type { AppStateStoreSnapshot } from '../appstate/store.js'
+import type { GroupMetadata, SerializedGroupMetadata } from '../protocol/group.js'
 import type {
     SerializedSenderKeyState,
     SerializedSignalSession,
@@ -153,6 +154,15 @@ export interface CredentialSnapshot {
      * they have to survive a restart as well.
      */
     senderKeys?: SerializedSenderKeyState
+    /**
+     * The cached membership of the groups.
+     *
+     * The group server refuses a client that asks for the member list of the
+     * same group over and over, so the answer is kept. The membership has to
+     * survive a restart for the same reason: a fresh process would otherwise
+     * ask the server again, and a client that asks too often is refused.
+     */
+    groupMetadata?: Record<string, SerializedGroupMetadata>
 }
 
 /**

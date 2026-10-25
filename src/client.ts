@@ -589,6 +589,34 @@ export class LavaClient extends EventEmitter {
     }
 
     /**
+     * Restores the cached group memberships of a snapshot.
+     *
+     * The group server refuses a client that asks for the member list of the
+     * same group over and over, so the membership has to survive a restart.
+     *
+     * @param snapshot The snapshot to restore from.
+     */
+    private restoreGroupMetadata(snapshot: CredentialSnapshot): void {
+        for (const [groupJid, entry] of Object.entries(snapshot.groupMetadata ?? {})) {
+            this.groupParticipants.restore(groupJid, entry)
+        }
+    }
+
+    /**
+     * Persists the cached group memberships.
+     *
+     * The write is queued with the other credential writes, so two
+     * overlapping writes cannot overwrite each other.
+     */
+    private persistGroupMetadata(): void {
+        if (!this.credentials) return
+        const groupMetadata = this.groupParticipants.snapshot()
+        void this.updateCredentials({ groupMetadata }).catch((error: unknown) => {
+            this.emitError(error)
+        })
+    }
+
+    /**
      * Drops a consumed one-time pre-key from the persistent snapshot.
      *
      * @param id The id of the consumed pre-key.
@@ -886,6 +914,7 @@ export class LavaClient extends EventEmitter {
         if (existing) {
             this.credentials = existing
             this.restoreSignalKeys(existing)
+            this.restoreGroupMetadata(existing)
             return existing
         }
 
@@ -2961,6 +2990,7 @@ export class LavaClient extends EventEmitter {
             assertIqResult(response, 'group metadata')
             const metadata = parseGroupMetadata(response)
             this.groupParticipants.set(groupJid, metadata)
+            this.persistGroupMetadata()
             return metadata
         },
 
@@ -2984,6 +3014,7 @@ export class LavaClient extends EventEmitter {
          */
         refresh: (groupJid: string): void => {
             this.groupParticipants.invalidate(groupJid)
+            this.persistGroupMetadata()
         },
 
         /**
@@ -3537,6 +3568,7 @@ export class LavaClient extends EventEmitter {
             // The answer held no group node; the member list is what matters.
         }
         this.groupParticipants.set(groupJid, metadata)
+        this.persistGroupMetadata()
         return participants
     }
 

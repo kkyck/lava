@@ -23,6 +23,19 @@ import {
 } from '../transport/node/helpers.js'
 import { WA_NODE_TAGS } from './constants.js'
 
+/**
+ * A cached group membership.
+ *
+ * The membership is plain data — no key material is involved — so it is
+ * stored as it is.
+ */
+export interface SerializedGroupMetadata {
+    /** The metadata of the group. */
+    metadata: GroupMetadata
+    /** When the entry was written, in milliseconds since the epoch. */
+    updatedAtMs: number
+}
+
 /** The role of a group member. */
 export type GroupParticipantRole = 'admin' | 'superadmin' | 'regular'
 
@@ -287,5 +300,37 @@ export class GroupMetadataCache {
     /** Drops every cached membership. */
     clear(): void {
         this.entries.clear()
+    }
+
+    /**
+     * Returns every cached membership with the time it was written.
+     *
+     * The entries are handed out so they can be persisted: a restart would
+     * otherwise ask the group server for the member list again, and a client
+     * that asks too often is refused.
+     */
+    snapshot(): Record<string, SerializedGroupMetadata> {
+        const out: Record<string, SerializedGroupMetadata> = {}
+        for (const [groupJid, entry] of this.entries) {
+            out[groupJid] = { metadata: entry.metadata, updatedAtMs: entry.updatedAtMs }
+        }
+        return out
+    }
+    /**
+     * Restores a persisted membership.
+     *
+     * An entry that is older than the lifetime of the cache is dropped: the
+     * membership of a group may have changed in the meantime.
+     *
+     * @param groupJid The group.
+     * @param entry The persisted entry.
+     */
+    restore(groupJid: string, entry: SerializedGroupMetadata): void {
+        if (!entry?.metadata) return
+        if (Date.now() - entry.updatedAtMs > this.ttlMs) return
+        this.entries.set(groupJid, {
+            metadata: entry.metadata,
+            updatedAtMs: entry.updatedAtMs,
+        })
     }
 }

@@ -168,7 +168,11 @@ export interface AppStateSyncClientOptions {
     crypto?: AppStateCrypto
     /** The logger the recoverable problems are reported to. */
     logger?: {
-        log: (record: { level: 'warn'; message: string; fields?: Record<string, unknown> }) => void
+        log: (record: {
+            level: 'warn' | 'debug'
+            message: string
+            fields?: Record<string, unknown>
+        }) => void
     }
 }
 
@@ -561,6 +565,17 @@ export class AppStateSyncClient {
             )
         }
         const current = this.store.getCollectionState(collection)
+        if (patchVersion <= current.version) {
+            /**
+             * The patch is not newer than the local state: it was already
+             * applied, or the server sent an older one. Applying it again
+             * would move the collection backwards, so it is skipped. The
+             * server repeats the patches of the last rounds on every
+             * connect, so this is the normal case, not an error.
+             */
+            this.log(`app-state: skipped the outdated patch of ${collection} (${patchVersion})`)
+            return []
+        }
         if (current.version !== patchVersion - 1) {
             throw new Error(
                 `app-state: patch version mismatch for ${collection}: local=${current.version}, incoming=${patchVersion}`,
@@ -1162,6 +1177,11 @@ export class AppStateSyncClient {
     /** Reports a problem that does not stop the sync. */
     private warn(message: string): void {
         this.options.logger?.log({ level: 'warn', message })
+    }
+
+    /** Reports a detail of the sync. */
+    private log(message: string): void {
+        this.options.logger?.log({ level: 'debug', message })
     }
 }
 

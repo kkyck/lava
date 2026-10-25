@@ -186,4 +186,36 @@ describe('group metadata cache', () => {
     it('has a sane default lifetime', () => {
         assert.equal(GROUP_METADATA_CACHE_TTL_MS, 5 * 60 * 1000)
     })
+
+    it('hands its entries out so they can be persisted', () => {
+        const cache = new GroupMetadataCache()
+        const metadata = parseGroupMetadata(GROUP_RESPONSE)
+        cache.set('a@g.us', metadata)
+        const snapshot = cache.snapshot()
+        assert.ok(snapshot['a@g.us'])
+        assert.equal(snapshot['a@g.us']!.metadata, metadata)
+        assert.ok(snapshot['a@g.us']!.updatedAtMs > 0)
+    })
+
+    it('restores a persisted membership', () => {
+        const cache = new GroupMetadataCache()
+        const metadata = parseGroupMetadata(GROUP_RESPONSE)
+        cache.set('a@g.us', metadata)
+        const snapshot = cache.snapshot()
+
+        const restored = new GroupMetadataCache()
+        restored.restore('a@g.us', snapshot['a@g.us']!)
+        assert.equal(restored.get('a@g.us'), metadata)
+    })
+
+    it('drops a persisted membership that is too old', () => {
+        const cache = new GroupMetadataCache({ ttlMs: 10 })
+        const restored = new GroupMetadataCache({ ttlMs: 10 })
+        restored.restore('a@g.us', {
+            metadata: parseGroupMetadata(GROUP_RESPONSE),
+            updatedAtMs: Date.now() - 1000,
+        })
+        assert.equal(restored.get('a@g.us'), undefined)
+        assert.equal(cache.get('a@g.us'), undefined)
+    })
 })

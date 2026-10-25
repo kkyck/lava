@@ -566,6 +566,33 @@ describe('app-state sync', () => {
         )
     })
 
+    it('skips a patch that was already applied', () => {
+        // The server repeats the patches of the last rounds on every connect,
+        // so a patch that is not newer than the local state is normal.
+        const { client, store } = makeClient()
+        const key = generateSyncKey(1, 1000)
+        store.upsertKeys([key])
+        store.setCollectionState('regular', {
+            initialized: true,
+            version: 6,
+            hash: APP_STATE_EMPTY_LT_HASH,
+            indexValueMap: new Map(),
+        })
+        for (const version of [6, 4]) {
+            const patch = encode('SyncdPatch', {
+                version: { version },
+                mutations: [],
+                snapshotMac: new Uint8Array(32),
+                patchMac: new Uint8Array(32),
+                keyId: { id: key.keyId },
+            })
+            const mutations = client.applyPatch('regular', decode('SyncdPatch', patch))
+            assert.deepEqual(mutations, [])
+        }
+        // The local version did not move.
+        assert.equal(store.getCollectionState('regular').version, 6)
+    })
+
     it('applies a patch and advances the version', () => {
         const { client, store } = makeClient()
         const key = generateSyncKey(1, 1000)
