@@ -1680,7 +1680,12 @@ export class LavaClient extends EventEmitter {
         return buildWhatsAppQrPayload({
             ref,
             noisePublicKey: fromBase64(credentials.noiseKeyPair.pub),
-            identityPublicKey: fromBase64(credentials.identityKeyPair.pub),
+            /**
+             * The phone encrypts to the companion with the identity key of
+             * the QR payload, so the payload carries the *raw* key — 32
+             * bytes — and not the serialized form the key store keeps.
+             */
+            identityPublicKey: toRawPublicKey(fromBase64(credentials.identityKeyPair.pub)),
             advSecret: credentials.advSecretKey
                 ? fromBase64(credentials.advSecretKey)
                 : new Uint8Array(32),

@@ -25,6 +25,7 @@ import {
     x25519PublicFromPrivate,
 } from '../src/crypto/primitives.js'
 import { findNodeChild } from '../src/transport/node/helpers.js'
+import { parseWhatsAppQrPayload } from '../src/qr/whatsapp.js'
 import type { BinaryNode } from '../src/transport/binary/types.js'
 import type { WaTransport } from '../src/client.js'
 
@@ -128,6 +129,30 @@ describe('pair-device handling', () => {
 
         await waitFor(() => qrs.length > 0)
         assert.match(qrs[0] ?? '', /ref-1/)
+        client.disconnect()
+    })
+
+    it('puts the raw identity key into the QR payload', async () => {
+        const { client, transport } = makeClient()
+        await client.connect()
+
+        const qrs: string[] = []
+        client.on(LavaClient.AUTH_QR, ({ qr }: { qr: string }) => qrs.push(qr))
+
+        transport.handlers.onNode?.(pairDeviceIq(['ref-1']))
+
+        await waitFor(() => qrs.length > 0)
+
+        const payload = parseWhatsAppQrPayload(qrs[0] ?? '')
+        assert.ok(payload)
+        /**
+         * The phone encrypts to the companion with the identity key of the
+         * payload, so it carries the raw key — 32 bytes — and not the
+         * serialized form the key store keeps.
+         */
+        assert.equal(payload.identityPublicKey.length, 32)
+        assert.equal(payload.noisePublicKey.length, 32)
+        assert.equal(payload.advSecret.length, 32)
         client.disconnect()
     })
 
