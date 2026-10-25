@@ -20,7 +20,7 @@ import type {
     SignalIdentity,
     SignalSession,
 } from './session.js'
-import type { SenderKeyMessageKey, SenderKeyRecord } from './group.js'
+import type { SenderKeyGeneration, SenderKeyMessageKey, SenderKeyRecord } from './group.js'
 import { fromHex, toHex } from '../crypto/primitives.js'
 
 /** The serialised form of a message key. */
@@ -366,13 +366,37 @@ export interface SerializedSenderKeyRecord {
     signingPrivateKey?: string
     /** The keys retained for messages that arrive out of order. */
     unusedMessageKeys: SerializedSenderKeyMessageKey[]
+    /**
+     * The generations that were replaced, newest first.
+     *
+     * Only present when the sender re-keyed the group; a generation that was
+     * replaced is kept so the messages that were encrypted with it can still
+     * be read.
+     */
+    previousStates?: SerializedSenderKeyGeneration[]
+}
+
+/** The serialised form of one generation of a sender key. */
+export interface SerializedSenderKeyGeneration {
+    /** Id of the sender key. */
+    keyId: number
+    /** Iteration of the next message to be produced/consumed. */
+    iteration: number
+    /** Current chain key, hex. */
+    chainKey: string
+    /** Signing public key (33-byte serialized form), hex. */
+    signingPublicKey: string
+    /** Signing private key (32 bytes); only present on the sending side. */
+    signingPrivateKey?: string
+    /** The keys retained for messages that arrive out of order. */
+    unusedMessageKeys: SerializedSenderKeyMessageKey[]
 }
 
 /** The serialised state of the sender-key manager. */
 export interface SerializedSenderKeyState {
     /** The own sender keys, keyed by group id. */
     own: Record<string, SerializedSenderKeyRecord>
-    /** The received sender keys, keyed by `groupId   sender`. */
+    /** The received sender keys, keyed by `groupId \u0000 sender`. */
     received: Record<string, SerializedSenderKeyRecord>
 }
 
@@ -399,6 +423,46 @@ export function deserializeSenderKeyMessageKey(
 }
 
 /**
+ * Serialises one generation of a sender key.
+ *
+ * @param generation The generation.
+ */
+export function serializeSenderKeyGeneration(
+    generation: SenderKeyGeneration,
+): SerializedSenderKeyGeneration {
+    return {
+        keyId: generation.keyId,
+        iteration: generation.iteration,
+        chainKey: toHex(generation.chainKey),
+        signingPublicKey: toHex(generation.signingPublicKey),
+        ...(generation.signingPrivateKey
+            ? { signingPrivateKey: toHex(generation.signingPrivateKey) }
+            : {}),
+        unusedMessageKeys: generation.unusedMessageKeys.map(serializeSenderKeyMessageKey),
+    }
+}
+
+/**
+ * Restores one generation of a sender key.
+ *
+ * @param generation The serialised generation.
+ */
+export function deserializeSenderKeyGeneration(
+    generation: SerializedSenderKeyGeneration,
+): SenderKeyGeneration {
+    return {
+        keyId: generation.keyId,
+        iteration: generation.iteration,
+        chainKey: fromHex(generation.chainKey),
+        signingPublicKey: fromHex(generation.signingPublicKey),
+        ...(generation.signingPrivateKey
+            ? { signingPrivateKey: fromHex(generation.signingPrivateKey) }
+            : {}),
+        unusedMessageKeys: generation.unusedMessageKeys.map(deserializeSenderKeyMessageKey),
+    }
+}
+
+/**
  * Serialises a sender key.
  *
  * @param record The sender key.
@@ -415,6 +479,11 @@ export function serializeSenderKeyRecord(record: SenderKeyRecord): SerializedSen
             ? { signingPrivateKey: toHex(record.signingPrivateKey) }
             : {}),
         unusedMessageKeys: record.unusedMessageKeys.map(serializeSenderKeyMessageKey),
+        ...(record.previousStates.length > 0
+            ? {
+                  previousStates: record.previousStates.map(serializeSenderKeyGeneration),
+              }
+            : {}),
     }
 }
 
@@ -435,5 +504,6 @@ export function deserializeSenderKeyRecord(record: SerializedSenderKeyRecord): S
             ? { signingPrivateKey: fromHex(record.signingPrivateKey) }
             : {}),
         unusedMessageKeys: record.unusedMessageKeys.map(deserializeSenderKeyMessageKey),
+        previousStates: (record.previousStates ?? []).map(deserializeSenderKeyGeneration),
     }
 }

@@ -15,6 +15,7 @@ import {
     decodeMessageBody,
     encodeMessageBody,
     extractSenderKeyDistribution,
+    hasMessageContent,
     prepareOutboundPlaintext,
     resolveContentType,
     resolveInboundMessageKey,
@@ -449,6 +450,60 @@ describe('sender key distribution', () => {
                 senderKeyDistributionMessage: { groupId: 'group@g.us' },
             }),
             null,
+        )
+    })
+})
+
+describe('message content', () => {
+    it('reports a body that carries a message', () => {
+        assert.equal(hasMessageContent({ conversation: 'hi' }), true)
+        assert.equal(
+            hasMessageContent({
+                extendedTextMessage: { text: 'hi' },
+            }),
+            true,
+        )
+    })
+
+    it('reports a body that only carries a distribution', () => {
+        assert.equal(
+            hasMessageContent({
+                senderKeyDistributionMessage: {
+                    groupId: 'group@g.us',
+                    axolotlSenderKeyDistributionMessage: new Uint8Array([1]),
+                },
+            }),
+            false,
+        )
+    })
+
+    it('ignores the metadata of a message', () => {
+        assert.equal(
+            hasMessageContent({
+                senderKeyDistributionMessage: {
+                    groupId: 'group@g.us',
+                    axolotlSenderKeyDistributionMessage: new Uint8Array([1]),
+                },
+                messageContextInfo: { messageSecret: new Uint8Array([2]) },
+            }),
+            false,
+        )
+    })
+
+    it('looks inside the envelope of a message', () => {
+        assert.equal(
+            hasMessageContent({
+                deviceSentMessage: {
+                    message: {
+                        senderKeyDistributionMessage: {
+                            groupId: 'group@g.us',
+                            axolotlSenderKeyDistributionMessage: new Uint8Array([1]),
+                        },
+                        messageContextInfo: { messageSecret: new Uint8Array([2]) },
+                    },
+                },
+            }),
+            false,
         )
     })
 })

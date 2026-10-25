@@ -266,6 +266,7 @@ describe('signal record structures', () => {
                 signingPublicKey: new Uint8Array(33).fill(1),
                 signingPrivateKey: new Uint8Array(32).fill(2),
                 unusedMessageKeys: [{ iteration: 2, seed: new Uint8Array(50).fill(3) }],
+                previousStates: [],
             }
             const encoded = encodeSenderKeyRecord(record)
             const decoded = decodeSenderKeyRecord(encoded, 'g', 's')

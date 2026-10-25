@@ -35,7 +35,7 @@
 
 import { decode, encode } from '../proto/codec.js'
 import type { RecvChain, SendChain, SignalSession } from './session.js'
-import type { SenderKeyRecord } from './group.js'
+import type { SenderKeyGeneration, SenderKeyRecord } from './group.js'
 
 /**
  * A decoded `RecordStructure`.
@@ -90,9 +90,10 @@ export function decodeSignalSessionRecord(
 /**
  * Decodes a `SenderKeyRecordStructure` blob into a sender key.
  *
- * The record may hold several states — one per generation of the sender
- * key — but only the newest one is returned, because a sender key is only
- * ever used for the messages that follow its distribution.
+ * The record holds one state per generation of the sender key, newest last.
+ * The newest one is the generation that is currently in use; the others are
+ * the generations it replaced, which are kept so the messages that were
+ * encrypted with them can still be read.
  *
  * @param raw The `SenderKeyRecordStructure` blob.
  * @param groupId The group the key belongs to.
@@ -115,6 +116,7 @@ export function decodeSenderKeyRecord(
         signingPublicKey: state.signingPublicKey,
         ...(state.signingPrivateKey ? { signingPrivateKey: state.signingPrivateKey } : {}),
         unusedMessageKeys: state.unusedMessageKeys,
+        previousStates: states.slice(0, -1).reverse(),
     }
 }
 
@@ -125,7 +127,7 @@ export function decodeSenderKeyRecord(
  */
 export function decodeSenderKeyStates(
     raw: Uint8Array,
-): Omit<SenderKeyRecord, 'groupId' | 'sender'>[] {
+): SenderKeyGeneration[] {
     const decoded = decode('SenderKeyRecordStructure', raw)
     const states = asArray(decoded.senderKeyStates)
     return states.map((entry, index) => {
@@ -184,27 +186,37 @@ export function encodeSignalSessionRecord(
 /**
  * Encodes a sender key into a `SenderKeyRecordStructure` blob.
  *
+ * Every generation of the sender key is written, oldest first, so the newest
+ * one is the last — the order every Signal implementation uses.
+ *
  * @param record The sender key.
  */
 export function encodeSenderKeyRecord(record: SenderKeyRecord): Uint8Array {
+    const states = [...record.previousStates].reverse()
+    states.push({
+        keyId: record.keyId,
+        iteration: record.iteration,
+        chainKey: record.chainKey,
+        signingPublicKey: record.signingPublicKey,
+        ...(record.signingPrivateKey ? { signingPrivateKey: record.signingPrivateKey } : {}),
+        unusedMessageKeys: record.unusedMessageKeys,
+    })
     return encode('SenderKeyRecordStructure', {
-        senderKeyStates: [
-            {
-                senderKeyId: record.keyId,
-                senderChainKey: {
-                    iteration: record.iteration,
-                    seed: record.chainKey,
-                },
-                senderSigningKey: {
-                    public: record.signingPublicKey,
-                    ...(record.signingPrivateKey ? { private: record.signingPrivateKey } : {}),
-                },
-                senderMessageKeys: record.unusedMessageKeys.map((key) => ({
-                    iteration: key.iteration,
-                    seed: key.seed,
-                })),
+        senderKeyStates: states.map((state) => ({
+            senderKeyId: state.keyId,
+            senderChainKey: {
+                iteration: state.iteration,
+                seed: state.chainKey,
             },
-        ],
+            senderSigningKey: {
+                public: state.signingPublicKey,
+                ...(state.signingPrivateKey ? { private: state.signingPrivateKey } : {}),
+            },
+            senderMessageKeys: state.unusedMessageKeys.map((key) => ({
+                iteration: key.iteration,
+                seed: key.seed,
+            })),
+        })),
     })
 }
 

@@ -514,7 +514,7 @@ export function buildSetGroupDescriptionIq(groupJid: string, description: string
  */
 export function buildGetGroupMetadataIq(groupJid: string): BinaryNode {
     return buildIqNode(WA_IQ_TYPES.GET, groupJid, WA_XMLNS.GROUPS, [
-        { tag: 'membership_approval_requests', attrs: {} },
+        { tag: WA_NODE_TAGS.QUERY, attrs: {} },
     ])
 }
 

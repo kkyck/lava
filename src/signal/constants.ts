@@ -37,6 +37,15 @@ export const FUTURE_MESSAGES_MAX = 2000
  */
 export const MAX_PREV_SESSIONS = 40
 
+/**
+ * Maximum number of sender-key generations kept per sender and group.
+ *
+ * A participant may re-key a group at any time. The messages that were
+ * encrypted with the previous key can still arrive afterwards, so the
+ * replaced generations are kept around for a while.
+ */
+export const MAX_SENDER_KEY_STATES = 5
+
 /** Label used when deriving the next chain key. */
 export const MESSAGE_KEY_LABEL = new Uint8Array([1])
 

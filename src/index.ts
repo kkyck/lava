@@ -164,6 +164,15 @@ export {
 export { computePhashV2 } from './protocol/phash.js'
 
 export {
+    findGroupNode,
+    parseGroupMetadata,
+    parseGroupParticipants,
+    type GroupMetadata,
+    type GroupParticipant,
+    type GroupParticipantRole,
+} from './protocol/group.js'
+
+export {
     buildAudioContent,
     buildDocumentContent,
     buildImageContent,
@@ -354,6 +363,7 @@ export {
     deserializeSendChain,
     deserializeSenderKeyMessageKey,
     deserializeSenderKeyRecord,
+    deserializeSenderKeyGeneration,
     deserializeSignalSession,
     serializeIdentity,
     serializeInitialExchangeInfo,
@@ -362,11 +372,13 @@ export {
     serializeSendChain,
     serializeSenderKeyMessageKey,
     serializeSenderKeyRecord,
+    serializeSenderKeyGeneration,
     serializeSignalSession,
     type SerializedInitialExchangeInfo,
     type SerializedMessageKey,
     type SerializedRecvChain,
     type SerializedSendChain,
+    type SerializedSenderKeyGeneration,
     type SerializedSenderKeyMessageKey,
     type SerializedSenderKeyRecord,
     type SerializedSenderKeyState,
@@ -387,8 +399,10 @@ export {
     SenderKeyChain,
     SenderKeyManager,
     deriveSenderKeyMessageKey,
+    selectSenderKeyMessageKey,
     type GroupEncryptionResult,
     type SenderKeyDerivation,
+    type SenderKeyGeneration,
     type SenderKeyMessageKey,
     type SenderKeyRecord,
 } from './signal/group.js'

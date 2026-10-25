@@ -66,7 +66,8 @@ await client.message.send('6281234567890@s.whatsapp.net', 'Hello from Lava')
 | Media upload / download | ✅ | ✅ | ✅ |
 | App-state sync (chat list, contacts) | ✅ | ⚠️ partial | ✅ |
 | Calls (signalling) | ✅ | ⚠️ partial | ⚠️ partial |
-| Bundle size | **~901 KB** raw JS | ~2.5 MB | ~4 MB |
+| Group sender keys | ✅ 5 generations | ✅ 5 generations | ⚠️ 1 generation |
+| Bundle size | **~945 KB** raw JS | ~2.5 MB | ~4 MB |
 
 **Zero dependencies means zero supply-chain risk.** Everything — the protobuf
 codec, the Signal double ratchet, XEdDSA, the Noise handshake, the QR encoder —
@@ -429,6 +430,10 @@ await client.group.promoteParticipants(groupJid, ['628…@s.whatsapp.net'])
 await client.group.demoteParticipants(groupJid, ['628…@s.whatsapp.net'])
 await client.group.setSubject(groupJid, 'New subject')
 await client.group.leave([groupJid])
+
+// The member list and the settings of the group.
+const metadata = await client.group.metadata(groupJid)
+const members = await client.group.participants(groupJid)
 ```
 
 ### `client.profile`
@@ -573,6 +578,11 @@ The **sender keys** of the group chats are stored as well. A sender key is
 the group counterpart of a double-ratchet session: its chain key advances
 with every group message, and the keys received from the other participants
 are the only way to decrypt an inbound group message at all.
+
+A participant may **re-key** a group at any time, which starts a new
+generation of the sender key. Lava keeps the five most recent generations of
+every sender, so a message that was encrypted with a key that has already
+been replaced can still be read.
 
 The one-time pre-keys are handed out with **sequential ids**, exactly like the
 official clients do, so they are unique inside the device and always fit the

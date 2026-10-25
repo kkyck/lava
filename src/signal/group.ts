@@ -37,6 +37,7 @@ import '../proto/schema.js'
 import {
     CHAIN_KEY_LABEL,
     FUTURE_MESSAGES_MAX,
+    MAX_SENDER_KEY_STATES,
     MAX_UNUSED_KEYS,
     MESSAGE_KEY_LABEL,
     SIGNAL_GROUP_VERSION,
@@ -75,12 +76,14 @@ export interface SenderKeyDerivation {
     messageKey: SenderKeyMessageKey
 }
 
-/** The state of one sender key. */
-export interface SenderKeyRecord {
-    /** The group the key belongs to. */
-    groupId: string
-    /** Address of the device that owns the key. */
-    sender: string
+/**
+ * One generation of a sender key.
+ *
+ * A sender key is replaced whenever its owner re-keys the group. Every
+ * generation has its own id, its own chain and its own signing key, so the
+ * generations of one sender are independent of each other.
+ */
+export interface SenderKeyGeneration {
     /** Id of the sender key. */
     keyId: number
     /** Iteration of the next message to be produced/consumed. */
@@ -93,6 +96,23 @@ export interface SenderKeyRecord {
     signingPrivateKey?: Uint8Array
     /** Keys retained for messages that arrive out of order. */
     unusedMessageKeys: SenderKeyMessageKey[]
+}
+
+/**
+ * The state of one sender key.
+ *
+ * The record holds the generation that is currently in use plus the ones it
+ * replaced. A message names the generation it was encrypted with, so the
+ * right one is picked out of the record — a message that was encrypted with a
+ * replaced generation can still arrive afterwards.
+ */
+export interface SenderKeyRecord extends SenderKeyGeneration {
+    /** The group the key belongs to. */
+    groupId: string
+    /** Address of the device that owns the key. */
+    sender: string
+    /** The generations that were replaced, newest first. */
+    previousStates: SenderKeyGeneration[]
 }
 
 /** The payload of a sender key distribution message. */
@@ -282,6 +302,7 @@ export class SenderKeyManager {
             signingPublicKey: toSerializedPublicKey(signingKeyPair.pubKey),
             signingPrivateKey: new Uint8Array(signingKeyPair.privKey),
             unusedMessageKeys: [],
+            previousStates: [],
         }
         this.ownKeys.set(groupId, record)
         this.notifyChanged()
@@ -291,6 +312,39 @@ export class SenderKeyManager {
     /** Returns the own sender key of `groupId`, if one exists. */
     getSenderKey(groupId: string): SenderKeyRecord | undefined {
         return this.ownKeys.get(groupId)
+    }
+
+    /**
+     * Re-keys the own sender key of a group.
+     *
+     * A new generation is started: it gets a fresh id, a fresh chain key and
+     * a fresh signing key pair. The generation it replaces is kept, so a
+     * message that was encrypted with it can still be read.
+     *
+     * @param groupId The group id.
+     */
+    rotateSenderKey(groupId: string): SenderKeyRecord {
+        const existing = this.ownKeys.get(groupId)
+        const signingKeyPair = generateSerializedKeyPair()
+        const record: SenderKeyRecord = {
+            groupId,
+            sender: this.localAddress,
+            keyId: 1 + randomInt31(),
+            iteration: 0,
+            chainKey: randomBytesOf(32),
+            signingPublicKey: toSerializedPublicKey(signingKeyPair.pubKey),
+            signingPrivateKey: new Uint8Array(signingKeyPair.privKey),
+            unusedMessageKeys: [],
+            previousStates: existing
+                ? [toGeneration(existing), ...existing.previousStates].slice(
+                      0,
+                      MAX_SENDER_KEY_STATES - 1,
+                  )
+                : [],
+        }
+        this.ownKeys.set(groupId, record)
+        this.notifyChanged()
+        return record
     }
 
     /** Returns the sender key received from `sender` for `groupId`. */
@@ -352,6 +406,16 @@ export class SenderKeyManager {
     /**
      * Stores a sender key distribution message received from `sender`.
      *
+     * A distribution announces a *generation* of the sender key. When the
+     * sender re-keys the group, a new generation starts and the previous one
+     * is kept: a message that was encrypted with it can still arrive
+     * afterwards, so the message would be unreadable if the generation was
+     * thrown away.
+     *
+     * A distribution for a generation that is already known is ignored: the
+     * state of that generation has moved on since the distribution was made,
+     * and the distribution would only move it backwards.
+     *
      * @param groupId The group the distribution belongs to.
      * @param sender Address of the sending device.
      * @param payload The versioned sender key distribution message.
@@ -362,6 +426,39 @@ export class SenderKeyManager {
         payload: Uint8Array,
     ): SenderKeyRecord {
         const distribution = parseSenderKeyDistribution(payload)
+        const mapKey = receiverKey(groupId, sender)
+        const existing = this.receivedKeys.get(mapKey)
+
+        if (!existing) {
+            const record: SenderKeyRecord = {
+                groupId,
+                sender,
+                keyId: distribution.keyId,
+                iteration: distribution.iteration,
+                chainKey: distribution.chainKey,
+                signingPublicKey: distribution.signingPublicKey,
+                unusedMessageKeys: [],
+                previousStates: [],
+            }
+            this.receivedKeys.set(mapKey, record)
+            this.notifyChanged()
+            return record
+        }
+
+        if (existing.keyId === distribution.keyId) {
+            // The generation is already in use and its chain has moved on.
+            return existing
+        }
+        if (existing.previousStates.some((state) => state.keyId === distribution.keyId)) {
+            // The generation was replaced before; the distribution is late.
+            return existing
+        }
+
+        // A new generation: the one it replaces is kept.
+        const previousStates = [
+            toGeneration(existing),
+            ...existing.previousStates,
+        ].slice(0, MAX_SENDER_KEY_STATES - 1)
         const record: SenderKeyRecord = {
             groupId,
             sender,
@@ -370,8 +467,9 @@ export class SenderKeyManager {
             chainKey: distribution.chainKey,
             signingPublicKey: distribution.signingPublicKey,
             unusedMessageKeys: [],
+            previousStates,
         }
-        this.receivedKeys.set(receiverKey(groupId, sender), record)
+        this.receivedKeys.set(mapKey, record)
         this.notifyChanged()
         return record
     }
@@ -449,19 +547,20 @@ export class SenderKeyManager {
         ciphertext: Uint8Array,
     ): Uint8Array {
         const parsed = parseSenderKeyMessage(ciphertext)
-        if (parsed.keyId !== record.keyId) {
+        const state = findGeneration(record, parsed.keyId)
+        if (!state) {
             throw new Error('sender key id mismatch')
         }
 
-        const rawSigningKey = fromSerializedPublicKey(record.signingPublicKey)
+        const rawSigningKey = fromSerializedPublicKey(state.signingPublicKey)
         if (!xeddsaVerify(rawSigningKey, parsed.versionedContent, parsed.signature)) {
             throw new Error('invalid sender key signature')
         }
 
-        const selected = selectSenderKeyMessageKey(record, parsed.iteration)
+        const selected = selectSenderKeyMessageKey(state, parsed.iteration)
         const plaintext = aesCbcDecryptFromSeed(selected.messageKey.seed, parsed.ciphertext)
         // Only persist the advanced state after a successful decryption.
-        this.receivedKeys.set(key, selected.record)
+        this.receivedKeys.set(key, replaceGeneration(record, selected.state))
         this.notifyChanged()
         return plaintext
     }
@@ -484,7 +583,7 @@ export class SenderKeyManager {
         const candidates: Array<[string, SenderKeyRecord]> = []
         for (const [key, record] of this.receivedKeys) {
             if (!key.startsWith(prefix)) continue
-            if (record.keyId !== keyId) continue
+            if (!hasGeneration(record, keyId)) continue
             const user = key.slice(prefix.length).split('|')[0]
             if (user !== wantedUser) continue
             candidates.push([key, record])
@@ -614,17 +713,20 @@ export function parseSenderKeyMessage(payload: Uint8Array): ParsedSenderKeyMessa
  *
  * Out-of-order messages are supported: the keys of the skipped iterations
  * are retained until they are used or evicted.
+ *
+ * @param state The generation of the sender key.
+ * @param targetIteration The iteration of the message.
  */
 export function selectSenderKeyMessageKey(
-    record: SenderKeyRecord,
+    state: SenderKeyGeneration,
     targetIteration: number,
-): { messageKey: SenderKeyMessageKey; record: SenderKeyRecord } {
-    const delta = targetIteration - record.iteration
+): { messageKey: SenderKeyMessageKey; state: SenderKeyGeneration } {
+    const delta = targetIteration - state.iteration
     if (delta > FUTURE_MESSAGES_MAX) {
         throw new Error('sender key message is too far in the future')
     }
 
-    const unused = record.unusedMessageKeys
+    const unused = state.unusedMessageKeys
     if (delta < 0) {
         const index = unused.findIndex((entry) => entry.iteration === targetIteration)
         if (index === -1) {
@@ -635,19 +737,19 @@ export function selectSenderKeyMessageKey(
         nextUnused.splice(index, 1)
         return {
             messageKey,
-            record: { ...record, unusedMessageKeys: nextUnused },
+            state: { ...state, unusedMessageKeys: nextUnused },
         }
     }
 
-    let chainKey = record.chainKey
-    let derived = deriveSenderKeyMessageKey(record.iteration, chainKey)
+    let chainKey = state.chainKey
+    let derived = deriveSenderKeyMessageKey(state.iteration, chainKey)
     chainKey = derived.nextChainKey
 
     if (delta === 0) {
         return {
             messageKey: derived.messageKey,
-            record: {
-                ...record,
+            state: {
+                ...state,
                 iteration: targetIteration + 1,
                 chainKey,
                 unusedMessageKeys: unused,
@@ -662,7 +764,7 @@ export function selectSenderKeyMessageKey(
         overflow -= nextUnused.length
     }
 
-    for (let iteration = record.iteration + 1; iteration <= targetIteration; iteration += 1) {
+    for (let iteration = state.iteration + 1; iteration <= targetIteration; iteration += 1) {
         if (overflow > 0) {
             overflow -= 1
         } else {
@@ -674,8 +776,8 @@ export function selectSenderKeyMessageKey(
 
     return {
         messageKey: derived.messageKey,
-        record: {
-            ...record,
+        state: {
+            ...state,
             iteration: targetIteration + 1,
             chainKey,
             unusedMessageKeys: nextUnused,
@@ -684,6 +786,73 @@ export function selectSenderKeyMessageKey(
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Extracts the current generation of a sender key.
+ *
+ * @param record The sender key.
+ */
+function toGeneration(record: SenderKeyRecord): SenderKeyGeneration {
+    return {
+        keyId: record.keyId,
+        iteration: record.iteration,
+        chainKey: record.chainKey,
+        signingPublicKey: record.signingPublicKey,
+        ...(record.signingPrivateKey ? { signingPrivateKey: record.signingPrivateKey } : {}),
+        unusedMessageKeys: record.unusedMessageKeys,
+    }
+}
+
+/**
+ * Finds the generation of a sender key that has the given key id.
+ *
+ * @param record The sender key.
+ * @param keyId The key id of the message.
+ */
+function findGeneration(
+    record: SenderKeyRecord,
+    keyId: number,
+): SenderKeyGeneration | undefined {
+    if (record.keyId === keyId) return toGeneration(record)
+    return record.previousStates.find((state) => state.keyId === keyId)
+}
+
+/**
+ * Reports whether a sender key knows the given key id.
+ *
+ * @param record The sender key.
+ * @param keyId The key id of the message.
+ */
+function hasGeneration(record: SenderKeyRecord, keyId: number): boolean {
+    if (record.keyId === keyId) return true
+    return record.previousStates.some((state) => state.keyId === keyId)
+}
+
+/**
+ * Writes an advanced generation back into the record it belongs to.
+ *
+ * @param record The sender key.
+ * @param generation The advanced generation.
+ */
+function replaceGeneration(
+    record: SenderKeyRecord,
+    generation: SenderKeyGeneration,
+): SenderKeyRecord {
+    if (generation.keyId === record.keyId) {
+        return {
+            ...record,
+            iteration: generation.iteration,
+            chainKey: generation.chainKey,
+            unusedMessageKeys: generation.unusedMessageKeys,
+        }
+    }
+    return {
+        ...record,
+        previousStates: record.previousStates.map((state) =>
+            state.keyId === generation.keyId ? generation : state,
+        ),
+    }
+}
 
 /**
  * Builds the map key for a received sender key.

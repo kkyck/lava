@@ -19,7 +19,7 @@ import {
 import { SignalSessionManager } from '../src/signal/manager.js'
 import { SenderKeyManager } from '../src/signal/group.js'
 import { deserializePreKeyMessage, deserializeSignalMessage } from '../src/signal/session.js'
-import { SIGNAL_VERSION } from '../src/signal/constants.js'
+import { MAX_SENDER_KEY_STATES, SIGNAL_VERSION } from '../src/signal/constants.js'
 import { prependVersion } from '../src/crypto/primitives.js'
 import { encode } from '../src/proto/codec.js'
 import '../src/proto/schema.js'
@@ -319,6 +319,102 @@ describe('sender keys (group chats)', () => {
         bob.manager.processSenderKeyDistribution(GROUP, '33333333333:0@s.whatsapp.net', group.distributionMessage!)
 
         assert.throws(() => bob.manager.decryptFromGroup(GROUP, ALICE, group.ciphertext))
+    })
+
+    it('keeps the generation that a re-key replaced', () => {
+        const alice = makePeer(ALICE)
+        const bob = makePeer(BOB)
+
+        // The first generation of the sender key.
+        const first = alice.manager.encryptForGroup(GROUP, utf8('first generation'))
+        bob.manager.processSenderKeyDistribution(GROUP, ALICE, first.distributionMessage!)
+        const firstKeyId = alice.manager.senderKeyManager.getSenderKey(GROUP)!.keyId
+
+        // The sender re-keys the group; the new generation is distributed.
+        alice.manager.senderKeyManager.rotateSenderKey(GROUP)
+        const second = alice.manager.encryptForGroup(GROUP, utf8('second generation'))
+        bob.manager.processSenderKeyDistribution(GROUP, ALICE, second.distributionMessage!)
+
+        const record = bob.manager.senderKeyManager.getReceivedSenderKey(GROUP, ALICE)!
+        assert.notEqual(record.keyId, firstKeyId)
+        assert.equal(record.previousStates.length, 1)
+        assert.equal(record.previousStates[0]!.keyId, firstKeyId)
+
+        // The message of the new generation is read.
+        const decrypted = bob.manager.decryptFromGroup(GROUP, ALICE, second.ciphertext)
+        assert.equal(fromUtf8(decrypted.plaintext), 'second generation')
+    })
+
+    it('reads a message that was encrypted with a replaced generation', () => {
+        const alice = makePeer(ALICE)
+        const bob = makePeer(BOB)
+
+        const first = alice.manager.encryptForGroup(GROUP, utf8('first generation'))
+        bob.manager.processSenderKeyDistribution(GROUP, ALICE, first.distributionMessage!)
+
+        // The sender re-keys the group, so the receiver only knows the new
+        // generation for a while.
+        alice.manager.senderKeyManager.rotateSenderKey(GROUP)
+        const second = alice.manager.encryptForGroup(GROUP, utf8('second generation'))
+        bob.manager.processSenderKeyDistribution(GROUP, ALICE, second.distributionMessage!)
+
+        // A message that was encrypted with the old generation arrives late.
+        const late = first.ciphertext
+        const decrypted = bob.manager.decryptFromGroup(GROUP, ALICE, late)
+        assert.equal(fromUtf8(decrypted.plaintext), 'first generation')
+    })
+
+    it('ignores a distribution of a generation it already knows', () => {
+        const alice = makePeer(ALICE)
+        const bob = makePeer(BOB)
+
+        const first = alice.manager.encryptForGroup(GROUP, utf8('first generation'))
+        bob.manager.processSenderKeyDistribution(GROUP, ALICE, first.distributionMessage!)
+
+        // The same distribution arrives a second time. The state of the
+        // generation has moved on, so it must not be rolled back.
+        bob.manager.processSenderKeyDistribution(GROUP, ALICE, first.distributionMessage!)
+        const record = bob.manager.senderKeyManager.getReceivedSenderKey(GROUP, ALICE)!
+        assert.equal(record.previousStates.length, 0)
+
+        const decrypted = bob.manager.decryptFromGroup(GROUP, ALICE, first.ciphertext)
+        assert.equal(fromUtf8(decrypted.plaintext), 'first generation')
+    })
+
+    it('keeps at most five generations of a sender key', () => {
+        const alice = makePeer(ALICE)
+        const bob = makePeer(BOB)
+
+        for (let round = 0; round < 8; round += 1) {
+            alice.manager.senderKeyManager.rotateSenderKey(GROUP)
+            const group = alice.manager.encryptForGroup(GROUP, utf8(`round ${round}`))
+            bob.manager.processSenderKeyDistribution(GROUP, ALICE, group.distributionMessage!)
+        }
+
+        const record = bob.manager.senderKeyManager.getReceivedSenderKey(GROUP, ALICE)!
+        assert.equal(record.previousStates.length, MAX_SENDER_KEY_STATES - 1)
+        assert.equal(record.previousStates.length + 1, MAX_SENDER_KEY_STATES)
+    })
+
+    it('finds a replaced generation of another device of the participant', () => {
+        const alice = makePeer(ALICE)
+        const bob = makePeer(BOB)
+
+        // The sender key belongs to the second device of the participant.
+        const aliceSecondDevice = '11111111111:2@s.whatsapp.net'
+        const first = alice.manager.encryptForGroup(GROUP, utf8('first generation'))
+        bob.manager.processSenderKeyDistribution(GROUP, aliceSecondDevice, first.distributionMessage!)
+
+        // The sender re-keys the group, so the receiver learns a new
+        // generation and keeps the old one.
+        alice.manager.senderKeyManager.rotateSenderKey(GROUP)
+        const second = alice.manager.encryptForGroup(GROUP, utf8('second generation'))
+        bob.manager.processSenderKeyDistribution(GROUP, aliceSecondDevice, second.distributionMessage!)
+
+        // The stanza names the participant without its device id, so the
+        // key of the second device has to be found by its key id.
+        const late = bob.manager.decryptFromGroup(GROUP, ALICE, first.ciphertext)
+        assert.equal(fromUtf8(late.plaintext), 'first generation')
     })
 })
 

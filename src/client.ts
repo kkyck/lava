@@ -170,6 +170,7 @@ import {
     buildCallTerminateNode,
     buildChatStateNode,
     buildCreateGroupIq,
+    buildGetGroupMetadataIq,
     buildGetPrivacyDisallowedListIq,
     buildGetPrivacySettingsIq,
     buildGroupParticipantChangeIq,
@@ -191,6 +192,8 @@ import {
 import { assertIqResult, parseIqError } from './transport/node/query.js'
 import { generateMessageId, generateRandomId } from './util/message-id.js'
 import { buildWhatsAppQrPayload } from './qr/whatsapp.js'
+import { parseGroupMetadata, parseGroupParticipants } from './protocol/group.js'
+import type { GroupMetadata, GroupParticipant } from './protocol/group.js'
 
 /** The transport a client runs on. */
 export type WaTransportMode = 'mobile' | 'web'
@@ -2718,6 +2721,31 @@ export class LavaClient extends EventEmitter {
         setSubject: async (groupJid: string, subject: string): Promise<BinaryNode> => {
             return this.query(buildSetGroupSubjectIq(groupJid, subject))
         },
+
+        /**
+         * Reads the metadata of a group.
+         *
+         * The metadata holds the settings of the group and the list of its
+         * members.
+         *
+         * @param groupJid The group.
+         */
+        metadata: async (groupJid: string): Promise<GroupMetadata> => {
+            const response = await this.query(buildGetGroupMetadataIq(groupJid))
+            assertIqResult(response, 'group metadata')
+            return parseGroupMetadata(response)
+        },
+
+        /**
+         * Reads the members of a group.
+         *
+         * @param groupJid The group.
+         */
+        participants: async (groupJid: string): Promise<GroupParticipant[]> => {
+            const response = await this.query(buildGetGroupMetadataIq(groupJid))
+            assertIqResult(response, 'group participants')
+            return parseGroupParticipants(response)
+        },
     }
 
     /** The profile API. */
@@ -3100,35 +3128,19 @@ export class LavaClient extends EventEmitter {
     /**
      * Reads the participant list of a group.
      *
+     * The group server answers a `w:g2` query with the metadata of the group,
+     * the member list included. The members are addressed by their linked
+     * identity (LID) when the group uses that addressing mode, and by their
+     * phone number otherwise.
+     *
      * @param groupJid The group.
      */
     private async queryGroupParticipants(groupJid: string): Promise<string[]> {
-        const sid = generateRandomId()
-        const response = await this.query(
-            buildUsyncIq({
-                sid,
-                users: [{ jid: groupJid }],
-                queryProtocolNodes: [
-                    {
-                        tag: 'participants',
-                        attrs: {},
-                        content: [{ tag: 'participant', attrs: {} }],
-                    },
-                ],
-            }),
-        )
+        const response = await this.query(buildGetGroupMetadataIq(groupJid))
         assertIqResult(response, 'group participants')
-        const usync = findNodeChild(response, WA_NODE_TAGS.USYNC)
-        const list = usync ? findNodeChild(usync, WA_NODE_TAGS.LIST) : undefined
-        if (!list) return []
         const out: string[] = []
-        for (const userNode of getNodeChildrenByTag(list, WA_NODE_TAGS.USER)) {
-            const participants = findNodeChild(userNode, 'participants')
-            if (!participants) continue
-            for (const participant of getNodeChildrenByTag(participants, WA_NODE_TAGS.PARTICIPANT)) {
-                const jid = participant.attrs.jid
-                if (jid) out.push(jid)
-            }
+        for (const participant of parseGroupParticipants(response)) {
+            out.push(participant.jid)
         }
         return out
     }

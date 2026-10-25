@@ -116,6 +116,14 @@ const DISTRIBUTION_FIELDS = new Set([
 ])
 
 /**
+ * The body fields that describe a message instead of being one.
+ *
+ * The context info carries the metadata of a message — the device list, the
+ * message secret, the expiry — and never a message of its own.
+ */
+const METADATA_FIELDS = new Set(['messageContextInfo'])
+
+/**
  * Reports whether a body carries anything besides a sender-key distribution.
  *
  * A group message carries the distribution of the sender key *and* the
@@ -125,8 +133,9 @@ const DISTRIBUTION_FIELDS = new Set([
  * @param body The message body.
  */
 export function hasMessageContent(body: MessageContent): boolean {
-    for (const [key, value] of Object.entries(body)) {
+    for (const [key, value] of Object.entries(unwrapMessage(body))) {
         if (DISTRIBUTION_FIELDS.has(key)) continue
+        if (METADATA_FIELDS.has(key)) continue
         if (value === null || value === undefined) continue
         return true
     }
