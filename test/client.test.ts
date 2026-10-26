@@ -16,7 +16,18 @@ import { createHash } from 'node:crypto'
 import { describe, it } from 'node:test'
 
 import { LavaClient } from '../src/client.js'
-import { MemoryCredentialStore } from '../src/auth/credentials.js'
+import { MemoryCredentialStore, fromBase64, toBase64 } from '../src/auth/credentials.js'
+import {
+    concat,
+    generateX25519KeyPair,
+    toRawPublicKey,
+} from '../src/crypto/primitives.js'
+import { xeddsaSign } from '../src/crypto/curve25519.js'
+import {
+    ADV_PREFIX_ACCOUNT_SIGNATURE,
+    computeAdvIdentityHmac,
+} from '../src/signal/attestation.js'
+import { encode } from '../src/proto/codec.js'
 import { SignalSessionManager } from '../src/signal/manager.js'
 import { SenderKeyManager } from '../src/signal/group.js'
 import {
@@ -42,6 +53,7 @@ const ME_JID = '6281234567890@s.whatsapp.net'
 const ME_DEVICE_JID = '6281234567890:0@s.whatsapp.net'
 const PEER_JID = '6289999999999@s.whatsapp.net'
 const PEER_DEVICE_JID = '6289999999999:0@s.whatsapp.net'
+const GROUP_JID = '120363317298847177@g.us'
 
 /** The number of times a single stanza is asked to be resent. */
 const MAX_RETRY = 3
@@ -169,6 +181,7 @@ class MockTransport implements WaTransport {
         const xmlns = node.attrs.xmlns
         if (xmlns === 'usync') return this.answerDeviceList(node)
         if (xmlns === 'w:m') return this.answerMediaConn(node)
+        if (xmlns === 'w:g2') return this.answerGroupMetadata(node)
         if (xmlns === 'w:sync:app:state') return this.answerAppStateSync(node)
         if (xmlns === 'encrypt') {
             const keyFetch = findNodeChild(node, 'key_fetch')
@@ -189,6 +202,34 @@ class MockTransport implements WaTransport {
             return { tag: 'iq', attrs: { id: node.attrs.id ?? '', type: 'result' } }
         }
         return { tag: 'iq', attrs: { id: node.attrs.id ?? '', type: 'result' } }
+    }
+
+    /**
+     * Answers a group-metadata query with the member list of the group.
+     *
+     * The group server answers a `w:g2` query with a `<group>` node that
+     * holds the members as `<participant>` children.
+     */
+    private answerGroupMetadata(node: BinaryNode): BinaryNode {
+        const groupJid = node.attrs.to ?? GROUP_JID
+        const participants = [
+            { jid: ME_JID, role: 'admin' },
+            { jid: PEER_JID, role: 'member' },
+        ]
+        return {
+            tag: 'iq',
+            attrs: { id: node.attrs.id ?? '', type: 'result' },
+            content: [
+                {
+                    tag: 'group',
+                    attrs: { id: groupJid, subject: 'test group' },
+                    content: participants.map((participant) => ({
+                        tag: 'participant',
+                        attrs: { jid: participant.jid, type: participant.role },
+                    })),
+                },
+            ],
+        }
     }
 
     /**
@@ -1183,6 +1224,291 @@ describe('client messaging', () => {
         // A video call carries a `<video/>` marker.
         const video = findNodeChild(offer, 'video')
         assert.ok(video)
+    })
+})
+
+/**
+ * Builds a stanza the client cannot decrypt.
+ *
+ * The payload is garbage, so no decryption can succeed and the client asks
+ * the server to send the message again.
+ *
+ * @param id The id of the stanza.
+ */
+function undecryptableMessage(id: string): BinaryNode {
+    return {
+        tag: 'message',
+        attrs: {
+            from: PEER_JID,
+            id,
+            type: 'text',
+            t: '1700000000',
+        },
+        content: [
+            {
+                tag: 'enc',
+                attrs: { v: '2', type: 'msg' },
+                content: new Uint8Array([1, 2, 3, 4, 5]),
+            },
+        ],
+    }
+}
+
+describe('client device identity', () => {
+    /**
+     * Builds a paired client that owns a signed device identity.
+     *
+     * The server hands the identity out in the `<pair-success>` stanza and
+     * the client stores it with the credentials; the test writes it into
+     * the credential snapshot directly.
+     */
+    async function pairedClientWithIdentity(): Promise<{
+        client: LavaClient
+        transport: MockTransport
+        identity: Uint8Array
+    }> {
+        const store = new MemoryCredentialStore()
+        const seed = makeClient('mobile', { credentials: store })
+        await seed.client.connect()
+        await seed.client.disconnect()
+
+        const snapshot = await store.load()
+        assert.ok(snapshot)
+
+        const identity = encode('ADVSignedDeviceIdentity', {
+            details: encode('ADVDeviceIdentity', {
+                rawId: 1,
+                timestamp: 1700000000,
+                keyIndex: 7,
+                accountType: 0,
+                deviceType: 0,
+            }),
+            accountSignatureKey: new Uint8Array(32),
+            accountSignature: new Uint8Array(64),
+            deviceSignature: new Uint8Array(64),
+        })
+        await store.save({ ...snapshot, signedDeviceIdentity: toBase64(identity) })
+
+        const pair = makeClient('mobile', { credentials: store })
+        await pair.client.connect()
+        pair.transport.push({
+            tag: 'success',
+            attrs: {},
+            content: [{ tag: 'props', attrs: { jid: ME_JID } }],
+        })
+        await waitFor(() => pair.client.getState() === 'connected')
+        return { client: pair.client, transport: pair.transport, identity }
+    }
+
+    it('attaches the signed device identity to a message that opens a session', async () => {
+        const { client, transport, identity } = await pairedClientWithIdentity()
+
+        await client.message.send(PEER_JID, 'first')
+
+        const first = transport.sent.find((node) => node.tag === 'message')
+        assert.ok(first)
+        const enc = findNodeChild(
+            getNodeChildrenByTag(findNodeChild(first, 'participants')!, 'to')[0]!,
+            'enc',
+        )
+        assert.ok(enc)
+        // The first message of a session opens it.
+        assert.equal(enc.attrs.type, 'pkmsg')
+
+        const attached = findNodeChild(first, 'device-identity')
+        assert.ok(attached)
+        assert.ok(attached.content instanceof Uint8Array)
+        assert.deepEqual(attached.content, identity)
+
+        /**
+         * The session is open now, so the next message travels in it and
+         * carries no identity.
+         */
+        await client.message.send(PEER_JID, 'second')
+        const second = transport.sent.filter((node) => node.tag === 'message')[1]
+        assert.ok(second)
+        const encSecond = findNodeChild(
+            getNodeChildrenByTag(findNodeChild(second, 'participants')!, 'to')[0]!,
+            'enc',
+        )
+        assert.ok(encSecond)
+        assert.equal(encSecond.attrs.type, 'msg')
+        assert.equal(findNodeChild(second, 'device-identity'), undefined)
+    })
+
+    it('attaches the signed device identity to a group distribution', async () => {
+        const { client, transport, identity } = await pairedClientWithIdentity()
+
+        await client.message.send(GROUP_JID, 'hello group')
+
+        const stanza = transport.sent.find((node) => node.tag === 'message')
+        assert.ok(stanza)
+        assert.equal(stanza.attrs.to, GROUP_JID)
+
+        const attached = findNodeChild(stanza, 'device-identity')
+        assert.ok(attached)
+        assert.ok(attached.content instanceof Uint8Array)
+        assert.deepEqual(attached.content, identity)
+    })
+
+    it('sends no identity when the device was never paired with one', async () => {
+        const pair = makeClient()
+        await pair.client.connect()
+        pair.transport.push({
+            tag: 'success',
+            attrs: {},
+            content: [{ tag: 'props', attrs: { jid: ME_JID } }],
+        })
+        await waitFor(() => pair.client.getState() === 'connected')
+
+        await pair.client.message.send(PEER_JID, 'first')
+
+        const stanza = pair.transport.sent.find((node) => node.tag === 'message')
+        assert.ok(stanza)
+        assert.equal(findNodeChild(stanza, 'device-identity'), undefined)
+    })
+})
+
+describe('client retry receipts', () => {
+    /** Connects a client and marks it as paired. */
+    async function pairedClient(
+        store: MemoryCredentialStore,
+    ): Promise<{ client: LavaClient; transport: MockTransport }> {
+        const pair = makeClient('mobile', { credentials: store })
+        await pair.client.connect()
+        pair.transport.push({
+            tag: 'success',
+            attrs: {},
+            content: [{ tag: 'props', attrs: { jid: ME_JID } }],
+        })
+        await waitFor(() => pair.client.getState() === 'connected')
+        await waitFor(() => pair.transport.uploads.length > 0)
+        return pair
+    }
+
+    it('answers a retry request with the registration of this device', async () => {
+        const { client, transport } = await pairedClient(new MemoryCredentialStore())
+
+        transport.push(undecryptableMessage('INBOUND-RETRY-1'))
+        await waitFor(() => transport.sent.some((node) => node.tag === 'receipt'))
+
+        const receipt = transport.sent.find(
+            (node) => node.tag === 'receipt' && node.attrs.type === 'retry',
+        )
+        assert.ok(receipt)
+        assert.equal(receipt.attrs.id, 'INBOUND-RETRY-1')
+
+        /**
+         * The registration id names the device that asks for the resend, so
+         * the peer knows whose key bundle it has to use.
+         */
+        const registration = findNodeChild(receipt, 'registration')
+        assert.ok(registration)
+        assert.ok(registration.content instanceof Uint8Array)
+        assert.equal(registration.content.length, 4)
+        const expected = client.signalManager.keyStore.getRegistrationInfo()?.registrationId
+        assert.equal(readUint(registration.content), expected)
+
+        // The first attempt carries no key bundle.
+        assert.equal(findNodeChild(receipt, 'keys'), undefined)
+    })
+
+    it('answers the second retry request with the key bundle', async () => {
+        const { transport } = await pairedClient(new MemoryCredentialStore())
+        const stanza = undecryptableMessage('INBOUND-RETRY-2')
+
+        transport.push(stanza)
+        await waitFor(() => transport.sent.some((node) => node.tag === 'receipt'))
+        transport.push(stanza)
+        await waitFor(
+            () =>
+                transport.sent.filter(
+                    (node) => node.tag === 'receipt' && node.attrs.type === 'retry',
+                ).length >= 2,
+        )
+
+        const retries = transport.sent.filter(
+            (node) => node.tag === 'receipt' && node.attrs.type === 'retry',
+        )
+        const second = retries[1]
+        assert.ok(second)
+        assert.equal(findNodeChild(second, 'retry')?.attrs.count, '2')
+        assert.ok(findNodeChild(second, 'registration'))
+
+        /**
+         * The peer needs a key it can encrypt with, so the bundle names the
+         * type of the bundle, the identity of this device, the signed
+         * pre-key and a one-time pre-key.
+         */
+        const keys = findNodeChild(second, 'keys')
+        assert.ok(keys)
+        const type = findNodeChild(keys, 'type')
+        assert.ok(type)
+        assert.deepEqual(type.content, new Uint8Array([5]))
+
+        const identity = findNodeChild(keys, 'identity')
+        assert.ok(identity)
+        assert.ok(identity.content instanceof Uint8Array)
+        assert.equal(identity.content.length, 32)
+
+        const skey = findNodeChild(keys, 'skey')
+        assert.ok(skey)
+        assert.ok(findNodeChild(skey, 'id'))
+        assert.ok(findNodeChild(skey, 'value'))
+        assert.ok(findNodeChild(skey, 'signature'))
+
+        const key = findNodeChild(keys, 'key')
+        assert.ok(key)
+        assert.ok(findNodeChild(key, 'id'))
+        assert.ok(findNodeChild(key, 'value'))
+    })
+
+    it('spends the pre-key that travels in the retry bundle', async () => {
+        const store = new MemoryCredentialStore()
+        const { client, transport } = await pairedClient(store)
+        const keyStore = client.signalManager.keyStore
+        const before = keyStore.getFirstUnuploadedPreKeyId()
+
+        const stanza = undecryptableMessage('INBOUND-RETRY-3')
+        transport.push(stanza)
+        await waitFor(() => transport.sent.some((node) => node.tag === 'receipt'))
+        transport.push(stanza)
+        await waitFor(
+            () =>
+                transport.sent.filter(
+                    (node) => node.tag === 'receipt' && node.attrs.type === 'retry',
+                ).length >= 2,
+        )
+
+        const retries = transport.sent.filter(
+            (node) => node.tag === 'receipt' && node.attrs.type === 'retry',
+        )
+        const keys = findNodeChild(retries[1]!, 'keys')
+        assert.ok(keys)
+        const key = findNodeChild(keys, 'key')
+        assert.ok(key)
+        const id = findNodeChild(key, 'id')
+        assert.ok(id)
+        const preKeyId = readUint(id.content)
+
+        // The bundle holds the very next pre-key of the pool.
+        assert.equal(preKeyId, before)
+
+        /**
+         * The key travels straight to the peer, so the upload cursor moves
+         * past it: the server must never hand the same key out twice.
+         */
+        assert.equal(keyStore.getFirstUnuploadedPreKeyId(), preKeyId + 1)
+
+        // The cursor is persisted, so the key is never uploaded afterwards.
+        let persisted = -1
+        for (let round = 0; round < 200; round += 1) {
+            const snapshot = await store.load()
+            persisted = snapshot?.firstUnuploadedPreKeyId ?? -1
+            if (persisted === preKeyId + 1) break
+            await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+        assert.equal(persisted, preKeyId + 1)
     })
 })
 

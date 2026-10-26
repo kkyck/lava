@@ -215,16 +215,18 @@ export function buildCompanionFinishRequestNode(args: {
  * @param keyIndex The index of the signing key.
  * @param id The id of the `<pair-success>` request, so the server can match
  * the answer to its request.
+ * @param to The recipient of the answer — the host that sent the request.
  */
 export function buildPairDeviceSignResultNode(
     deviceIdentity: Uint8Array,
     keyIndex = 0,
     id?: string,
+    to: string = WA_DEFAULTS.HOST_DOMAIN,
 ): BinaryNode {
     return {
         tag: WA_NODE_TAGS.IQ,
         attrs: {
-            to: WA_DEFAULTS.HOST_DOMAIN,
+            to,
             type: WA_IQ_TYPES.RESULT,
             ...(id ? { id } : {}),
         },

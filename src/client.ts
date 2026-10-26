@@ -124,6 +124,7 @@ import {
     type DeviceEntry,
 } from './signal/device-list.js'
 import {
+    buildKeyBundleNode,
     buildMissingPreKeysFetchIq,
     buildPreKeyUploadIq,
     buildSignedPreKeyRotateIq,
@@ -1833,13 +1834,16 @@ export class LavaClient extends EventEmitter {
          * expects that answer and closes the socket without it.
          */
         const identityNode = findNodeChild(pairSuccess, WA_NODE_TAGS.DEVICE_IDENTITY)
+        let signedDeviceIdentity: string | undefined
         if (identityNode) {
             const signedIdentity = await this.answerPairSuccess(identityNode)
+            signedDeviceIdentity = toBase64(signedIdentity.content)
             this.send(
                 buildPairDeviceSignResultNode(
                     signedIdentity.content,
                     signedIdentity.keyIndex,
                     iqNode.attrs.id,
+                    iqNode.attrs.from ?? HOST_DOMAIN,
                 ),
             )
         }
@@ -1851,6 +1855,7 @@ export class LavaClient extends EventEmitter {
         await this.updateCredentials({
             ...(meJid ? { meJid } : {}),
             ...(meLid ? { meLid } : {}),
+            ...(signedDeviceIdentity ? { signedDeviceIdentity } : {}),
             transport: this.options.transport ?? 'mobile',
             loginCounter: 0,
         })
@@ -1927,6 +1932,20 @@ export class LavaClient extends EventEmitter {
             content: buildAdvSignedIdentityResponse(signed, deviceSignature),
             keyIndex: readAdvKeyIndex(signed.details),
         }
+    }
+
+    /**
+     * The account's signed device identity, as it travels on the wire.
+     *
+     * The official client attaches it to every message that opens a new
+     * Signal session, so the peer can attribute the message to a device.
+     *
+     * @returns The encoded identity, or `null` when the device has none.
+     */
+    private signedDeviceIdentityBytes(): Uint8Array | null {
+        const stored = this.credentials?.signedDeviceIdentity
+        if (!stored) return null
+        return fromBase64(stored)
     }
 
     /**
@@ -2078,11 +2097,63 @@ export class LavaClient extends EventEmitter {
         if (count > MAX_RETRY_COUNT) return
         this.retryCounts.set(id, count)
 
+        /**
+         * From the second attempt on, the peer gets this device's key
+         * bundle: the message is encrypted again with a one-time pre-key
+         * that was not used yet, so the peer can read it even when the
+         * first attempt failed with the key it had.
+         */
+        const bundle = count > 1 ? this.buildRetryKeyBundle() : null
+
         this.send(
             buildRetryReceiptNode(id, to, count, {
                 ...(node.attrs.participant ? { participant: node.attrs.participant } : {}),
                 ...(node.attrs.t ? { t: node.attrs.t } : {}),
+                ...(this.credentials?.registrationId !== undefined
+                    ? { registrationId: this.credentials.registrationId }
+                    : {}),
+                ...(bundle ? { keys: bundle } : {}),
             }),
+        )
+    }
+
+    /**
+     * Builds the key bundle that travels in the answer of a retry request.
+     *
+     * The bundle holds the identity key of this device, a one-time pre-key
+     * that was not used yet, the signed pre-key and — when the device was
+     * paired — the account's signed device identity.
+     *
+     * The pre-key travels directly to the peer, so it is never uploaded to
+     * the server: the server must not hand the same one-time pre-key out a
+     * second time.
+     *
+     * @returns The `<keys>` node, or `null` when the device has no keys.
+     */
+    private buildRetryKeyBundle(): BinaryNode | null {
+        const registration = this.keyStore.getRegistrationInfo()
+        const signedPreKey = this.keyStore.getSignedPreKey()
+        if (!registration || !signedPreKey) return null
+
+        const preKeys = this.keyStore.getOrGenPreKeys(1, generatePreKeyPair)
+        const preKey = preKeys[0]
+        if (!preKey) return null
+
+        /**
+         * The key is spent: it goes straight to the peer, so the upload
+         * cursor moves past it and the server never sees it.
+         */
+        this.keyStore.markKeyAsUploaded(preKey.keyId)
+        void this.persistPreKeyPool().catch((error: unknown) => {
+            this.emitError(error instanceof Error ? error : new Error(String(error)))
+        })
+
+        const deviceIdentity = this.signedDeviceIdentityBytes()
+        return buildKeyBundleNode(
+            registration,
+            signedPreKey,
+            preKey,
+            deviceIdentity ?? undefined,
         )
     }
 
@@ -3923,9 +3994,11 @@ export class LavaClient extends EventEmitter {
         if (devices.length === 0) throw new Error(`client: no devices known for ${to}`)
 
         const participants: EncryptedParticipant[] = []
+        let opensSession = false
         for (const device of devices) {
             const session = await this.ensureSignalSession(device.jid)
             const encrypted = this.signal.encryptForDevice(device.jid, plaintext)
+            if (encrypted.encType === 'pkmsg') opensSession = true
             participants.push({
                 jid: device.jid,
                 encType: encrypted.encType,
@@ -3933,6 +4006,12 @@ export class LavaClient extends EventEmitter {
             })
             void session
         }
+
+        /**
+         * A message that opens a Signal session carries the account's signed
+         * device identity, so the peer can attribute it to a device.
+         */
+        const deviceIdentity = opensSession ? this.signedDeviceIdentityBytes() : null
 
         this.send(
             buildDirectMessageFanoutNode(
@@ -3944,6 +4023,7 @@ export class LavaClient extends EventEmitter {
                     ...(attrs.edit ? { edit: attrs.edit } : {}),
                     ...(attrs.decryptFail ? { decryptFail: attrs.decryptFail } : {}),
                     ...(attrs.metaAttrs ? { additionalAttributes: attrs.metaAttrs } : {}),
+                    ...(deviceIdentity ? { deviceIdentity } : {}),
                 },
                 participants,
             ),
@@ -4015,12 +4095,14 @@ export class LavaClient extends EventEmitter {
 
         const participants: EncryptedParticipant[] = []
         const distributed: JidParts[] = []
+        let opensSession = false
         for (const device of devices) {
             const address = parseSignalAddressFromJid(device.jid)
             const key = `${address.user}|${address.server}|${address.device}`
             if (!pendingJids.has(key)) continue
             await this.ensureSignalSession(device.jid)
             const encrypted = this.signal.encryptForDevice(device.jid, distributionPayload)
+            if (encrypted.encType === 'pkmsg') opensSession = true
             participants.push({
                 jid: device.jid,
                 encType: encrypted.encType,
@@ -4042,6 +4124,12 @@ export class LavaClient extends EventEmitter {
         const phashTargets: string[] = this.groupFanoutDevices(groupJid, devices)
         if (senderJid) phashTargets.push(senderJid)
 
+        /**
+         * A distribution that opens a Signal session carries the account's
+         * signed device identity, so the peer can attribute it to a device.
+         */
+        const deviceIdentity = opensSession ? this.signedDeviceIdentityBytes() : null
+
         this.send(
             buildGroupSenderKeyMessageNode(
                 {
@@ -4054,6 +4142,7 @@ export class LavaClient extends EventEmitter {
                     ...(attrs.edit ? { edit: attrs.edit } : {}),
                     ...(attrs.decryptFail ? { decryptFail: attrs.decryptFail } : {}),
                     ...(attrs.metaAttrs ? { additionalAttributes: attrs.metaAttrs } : {}),
+                    ...(deviceIdentity ? { deviceIdentity } : {}),
                 },
                 participants,
                 group.ciphertext,

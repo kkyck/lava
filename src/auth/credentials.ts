@@ -101,6 +101,16 @@ export interface CredentialSnapshot {
     serverStaticKey?: string
     /** The ADV secret key used to sign the device attestation. */
     advSecretKey?: string
+    /**
+     * The account's signed device identity, base64 encoded.
+     *
+     * The server hands it out when the pairing is through: it is the
+     * account's signature over the details of this device, plus the
+     * device's own signature. The official client attaches it to every
+     * message that opens a new Signal session and to the answer of a retry
+     * request, so the peer can attribute the message to a device.
+     */
+    signedDeviceIdentity?: string
     /** The companion's encrypted static key, for companion devices. */
     companionEncStatic?: string
     /** The transport the device is paired for. */

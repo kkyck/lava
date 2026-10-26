@@ -15,6 +15,12 @@ import {
 } from '../../../protocol/constants.js'
 import type { BinaryNode } from '../../binary/types.js'
 
+/** The version of the retry receipt format. */
+export const RETRY_RECEIPT_VERSION = '1'
+
+/** The reason a message could not be decrypted — an unknown error. */
+export const RETRY_REASON_UNKNOWN = 0
+
 /**
  * Builds an `<ack>` stanza for a message.
  *
@@ -139,6 +145,15 @@ export function buildRetryReceiptNode(
         category?: string
         /** The `t` attribute. */
         t?: string
+        /** The registration id of this device. */
+        registrationId?: number
+        /**
+         * The key bundle of this device.
+         *
+         * The peer needs it to encrypt the message again with a one-time
+         * pre-key that was not used yet.
+         */
+        keys?: BinaryNode
     } = {},
 ): BinaryNode {
     const attrs: Record<string, string> = {
@@ -151,13 +166,39 @@ export function buildRetryReceiptNode(
     const retryAttrs: Record<string, string> = {
         count: String(count > 0 ? Math.trunc(count) : 1),
         id,
+        v: RETRY_RECEIPT_VERSION,
+        error: String(RETRY_REASON_UNKNOWN),
     }
     if (options.t) retryAttrs.t = options.t
+    const content: BinaryNode[] = [{ tag: 'retry', attrs: retryAttrs }]
+    if (options.registrationId !== undefined) {
+        content.push({
+            tag: 'registration',
+            attrs: {},
+            content: registrationIdBytes(options.registrationId),
+        })
+    }
+    if (options.keys) content.push(options.keys)
     return {
         tag: WA_MESSAGE_TAGS.RECEIPT,
         attrs,
-        content: [{ tag: 'retry', attrs: retryAttrs }],
+        content,
     }
+}
+
+/**
+ * Encodes a registration id the way the protocol expects it.
+ *
+ * @param registrationId The registration id.
+ */
+function registrationIdBytes(registrationId: number): Uint8Array {
+    const out = new Uint8Array(4)
+    let remaining = registrationId
+    for (let i = 3; i >= 0; i -= 1) {
+        out[i] = remaining & 0xff
+        remaining = Math.floor(remaining / 256)
+    }
+    return out
 }
 
 /**

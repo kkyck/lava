@@ -210,6 +210,66 @@ export function buildSignedPreKeyRotateIq(signedPreKey: SignedPreKeyRecord): Bin
     ])
 }
 
+/**
+ * Builds the `<keys>` node that carries this device's key bundle.
+ *
+ * The node travels in the answer of a retry request: the peer uses it to
+ * encrypt the message again with a one-time pre-key that was not used yet.
+ *
+ * @param registrationInfo The registration info of this device.
+ * @param signedPreKey The signed pre-key.
+ * @param preKey The one-time pre-key.
+ * @param deviceIdentity The account's signed device identity, when known.
+ */
+export function buildKeyBundleNode(
+    registrationInfo: RegistrationInfo,
+    signedPreKey: SignedPreKeyRecord,
+    preKey: PreKeyRecord,
+    deviceIdentity?: Uint8Array,
+): BinaryNode {
+    const content: BinaryNode[] = [
+        {
+            tag: WA_NODE_TAGS.TYPE,
+            attrs: {},
+            content: SIGNAL_KEY_BUNDLE_TYPE_BYTES,
+        },
+        {
+            tag: WA_NODE_TAGS.IDENTITY,
+            attrs: {},
+            content: toRawPublicKey(registrationInfo.identityKeyPair.pubKey),
+        },
+        buildSignedPreKeyNode(signedPreKey),
+        {
+            tag: WA_NODE_TAGS.KEY,
+            attrs: {},
+            content: [
+                {
+                    tag: WA_NODE_TAGS.ID,
+                    attrs: {},
+                    content: intToBytes(3, preKey.keyId),
+                },
+                {
+                    tag: WA_NODE_TAGS.VALUE,
+                    attrs: {},
+                    content: toRawPublicKey(preKey.keyPair.pubKey),
+                },
+            ],
+        },
+    ]
+    if (deviceIdentity && deviceIdentity.length > 0) {
+        content.push({
+            tag: WA_NODE_TAGS.DEVICE_IDENTITY,
+            attrs: {},
+            content: deviceIdentity,
+        })
+    }
+    return {
+        tag: WA_NODE_TAGS.KEYS,
+        attrs: {},
+        content,
+    }
+}
+
 /** A device whose pre-keys are being requested. */
 export interface PreKeyTargetDevice {
     /** The device id. */

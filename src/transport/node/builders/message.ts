@@ -74,6 +74,13 @@ export interface MessageNodeOptions {
     participant?: string
     /** Extra stanza attributes. */
     additionalAttributes?: Record<string, string>
+    /**
+     * The account's signed device identity.
+     *
+     * The official client attaches it to a message that opens a new Signal
+     * session, so the peer can attribute the message to a device.
+     */
+    deviceIdentity?: Uint8Array
 }
 
 /**
@@ -155,6 +162,20 @@ export function buildEncryptedToNodes(
 }
 
 /**
+ * Builds the `<device-identity>` node that carries the account's signed
+ * device identity.
+ *
+ * @param deviceIdentity The encoded identity.
+ */
+function buildDeviceIdentityNode(deviceIdentity: Uint8Array): BinaryNode {
+    return {
+        tag: WA_NODE_TAGS.DEVICE_IDENTITY,
+        attrs: {},
+        content: deviceIdentity,
+    }
+}
+
+/**
  * Builds a direct-chat fanout message.
  *
  * @param options The message options.
@@ -167,16 +188,20 @@ export function buildDirectMessageFanoutNode(
     if (participants.length === 0) {
         throw new Error('direct message fanout requires at least one participant')
     }
+    const content: BinaryNode[] = [
+        {
+            tag: WA_NODE_TAGS.PARTICIPANTS,
+            attrs: {},
+            content: buildEncryptedToNodes(participants, options.mediatype, options.decryptFail),
+        },
+    ]
+    if (options.deviceIdentity) {
+        content.push(buildDeviceIdentityNode(options.deviceIdentity))
+    }
     return {
         tag: WA_MESSAGE_TAGS.MESSAGE,
         attrs: buildMessageAttrs(options),
-        content: [
-            {
-                tag: WA_NODE_TAGS.PARTICIPANTS,
-                attrs: {},
-                content: buildEncryptedToNodes(participants, options.mediatype, options.decryptFail),
-            },
-        ],
+        content,
     }
 }
 
@@ -205,6 +230,9 @@ export function buildGroupSenderKeyMessageNode(
         attrs: buildEncAttrs('skmsg', options.mediatype, undefined, options.decryptFail),
         content: groupCiphertext,
     })
+    if (options.deviceIdentity) {
+        content.push(buildDeviceIdentityNode(options.deviceIdentity))
+    }
     return {
         tag: WA_MESSAGE_TAGS.MESSAGE,
         attrs: buildMessageAttrs(options),
